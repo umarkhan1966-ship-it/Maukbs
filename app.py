@@ -12,443 +12,47 @@ import secrets
 from datetime import datetime
 from fastapi import FastAPI, Request, Form, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse
+from core.db import DB_FILE, db, q
+from core.constants import STORE_GPS, GEOFENCE_RADIUS_M, SALES_CATS
+from core.security import (hash_password, verify_password,
+                           get_session, require_login)
+from core.layout import page
+from core import schema
 
 app     = FastAPI()
-DB_FILE = "business_vault.db"
 
-STORE_GPS = {
-    "Uxbridge": (51.5462, -0.4791),
-    "Newbury":  (51.4014, -1.3231)
-}
-GEOFENCE_RADIUS_M = 200
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATABASE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
 
-def q(sql, params=(), fetch=False):
-    conn = db()
-    cur  = conn.cursor()
-    cur.execute(sql, params)
-    result = cur.fetchall() if fetch else None
-    conn.commit()
-    conn.close()
-    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PASSWORD HASHING (salted PBKDF2 — no external dependency)
 # ══════════════════════════════════════════════════════════════════════════════
 
-PBKDF2_ITERATIONS = 200_000
-
-def hash_password(pw: str) -> str:
-    """Return a salted PBKDF2 hash string: pbkdf2_sha256$iters$salt$hash."""
-    salt = secrets.token_bytes(16)
-    dk   = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, PBKDF2_ITERATIONS)
-    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
-
-def verify_password(pw: str, stored: str) -> bool:
-    """Verify a password against a stored hash.
-
-    Supports the new salted PBKDF2 format and falls back to the legacy
-    unsalted SHA-256 hashes so existing accounts keep working until they
-    log in once (login upgrades them automatically)."""
-    if not stored:
-        return False
-    if stored.startswith("pbkdf2_sha256$"):
-        try:
-            _, iters, salt_hex, hash_hex = stored.split("$")
-            dk = hashlib.pbkdf2_hmac("sha256", pw.encode(),
-                                     bytes.fromhex(salt_hex), int(iters))
-            return secrets.compare_digest(dk.hex(), hash_hex)
-        except Exception:
-            return False
-    # Legacy unsalted SHA-256
-    legacy = hashlib.sha256(pw.encode()).hexdigest()
-    return secrets.compare_digest(legacy, stored)
 
 
-def init_db():
-    conn = db()
-    c    = conn.cursor()
 
-    # ── Users ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            username   TEXT UNIQUE NOT NULL,
-            password   TEXT NOT NULL,
-            full_name  TEXT,
-            role       TEXT NOT NULL DEFAULT 'staff',
-            store_name TEXT,
-            is_active  INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (date('now'))
-        )
-    """)
 
-    # ── Staff Profiles ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS staff_profiles (
-            staff_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            staff_number   INTEGER,
-            first_name     TEXT NOT NULL,
-            last_name      TEXT NOT NULL,
-            store_name     TEXT,
-            sex            TEXT,
-            phone          TEXT,
-            email          TEXT,
-            address_1      TEXT,
-            address_2      TEXT,
-            address_3      TEXT,
-            address_4      TEXT,
-            postcode       TEXT,
-            date_joined    TEXT,
-            date_left      TEXT,
-            leaving_reason TEXT,
-            date_of_birth  TEXT,
-            contracted_hrs REAL,
-            hourly_rate    REAL,
-            is_salaried    TEXT DEFAULT 'N',
-            salary_amount  REAL,
-            is_active      INTEGER DEFAULT 1
-        )
-    """)
 
-    # ── Supplier Invoices (Retail) ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS supplier_invoices (
-            invoice_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-            seq_no         INTEGER,
-            supplier_name  TEXT NOT NULL,
-            store_name     TEXT NOT NULL,
-            invoice_number TEXT,
-            invoice_date   TEXT,
-            gross_amount   REAL DEFAULT 0,
-            vat_amount     REAL DEFAULT 0,
-            net_amount     REAL DEFAULT 0,
-            payment_terms  INTEGER,
-            due_date       TEXT,
-            paid_date      TEXT,
-            amount_paid    REAL DEFAULT 0,
-            credit_note    REAL DEFAULT 0,
-            is_paid        TEXT DEFAULT 'No',
-            payment_method TEXT,
-            comments       TEXT,
-            pdf_path          TEXT,
-            approval_status   TEXT DEFAULT 'approved',
-            submitted_by      TEXT,
-            created_at        TEXT DEFAULT (date('now')),
-            UNIQUE(invoice_number, store_name)
-        )
-    """)
-
-    # ── Property Invoices / Expenses ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS property_invoices (
-            invoice_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-            property_name  TEXT NOT NULL,
-            supplier_name  TEXT NOT NULL,
-            invoice_number TEXT,
-            invoice_date   TEXT,
-            expense_type   TEXT,
-            gross_amount   REAL DEFAULT 0,
-            vat_amount     REAL DEFAULT 0,
-            net_amount     REAL DEFAULT 0,
-            due_date       TEXT,
-            paid_date      TEXT,
-            amount_paid    REAL DEFAULT 0,
-            credit_note    REAL DEFAULT 0,
-            is_paid        TEXT DEFAULT 'No',
-            payment_method TEXT,
-            comments       TEXT,
-            pdf_path          TEXT,
-            approval_status   TEXT DEFAULT 'approved',
-            submitted_by      TEXT,
-            created_at        TEXT DEFAULT (date('now'))
-        )
-    """)
-
-    # ── Rental Income ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS rental_income (
-            record_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            property_name    TEXT NOT NULL,
-            tenant_name      TEXT,
-            rent_from        TEXT,
-            rent_to          TEXT,
-            agreed_rent      REAL DEFAULT 0,
-            agency_comm      REAL DEFAULT 0,
-            agency_vat       REAL DEFAULT 0,
-            tds_fee          REAL DEFAULT 0,
-            gas_elec_cert    REAL DEFAULT 0,
-            inventory_fee    REAL DEFAULT 0,
-            deposit_fee      REAL DEFAULT 0,
-            tenancy_setup    REAL DEFAULT 0,
-            repairs          REAL DEFAULT 0,
-            repairs_vat      REAL DEFAULT 0,
-            mortgage         REAL DEFAULT 0,
-            net_rent         REAL DEFAULT 0,
-            date_received    TEXT,
-            notes            TEXT,
-            created_at       TEXT DEFAULT (date('now'))
-        )
-    """)
-
-    # ── Properties ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS properties (
-            property_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            short_name     TEXT UNIQUE NOT NULL,
-            full_address   TEXT NOT NULL,
-            purchase_price REAL,
-            mortgage       REAL,
-            monthly_mortgage REAL,
-            purchase_date  TEXT,
-            first_rented   TEXT,
-            is_active      INTEGER DEFAULT 1,
-            notes          TEXT
-        )
-    """)
-
-    # ── Rotas ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS store_rotas (
-            rota_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            staff_name TEXT NOT NULL,
-            store_name TEXT NOT NULL,
-            work_day   TEXT NOT NULL,
-            shift_time TEXT DEFAULT 'OFF',
-            UNIQUE(staff_name, store_name, work_day)
-        )
-    """)
-
-    # ── Timesheets ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS timesheets (
-            timesheet_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            staff_name     TEXT NOT NULL,
-            store_name     TEXT NOT NULL,
-            work_date      TEXT NOT NULL,
-            clock_in_time  TEXT,
-            clock_out_time TEXT,
-            status_flag    TEXT,
-            absence_type   TEXT,
-            comments       TEXT,
-            UNIQUE(staff_name, store_name, work_date)
-        )
-    """)
-
-    # ── Daily Sales ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS daily_sales (
-            sale_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            store_name     TEXT NOT NULL,
-            sale_date      TEXT NOT NULL,
-            week_ending    TEXT,
-            category       TEXT NOT NULL,
-            amount         REAL DEFAULT 0,
-            entered_by     TEXT,
-            created_at     TEXT DEFAULT (datetime('now')),
-            UNIQUE(store_name, sale_date, category)
-        )
-    """)
-
-    # ── Sales Targets ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sales_targets (
-            target_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            store_name     TEXT NOT NULL,
-            year           INTEGER NOT NULL,
-            month          INTEGER NOT NULL,
-            target_amount  REAL DEFAULT 0,
-            ly_actual      REAL DEFAULT 0,
-            target_pct     REAL DEFAULT 1.05,
-            UNIQUE(store_name, year, month)
-        )
-    """)
-
-    # ── Sessions (server-side login tokens) ──
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            token      TEXT PRIMARY KEY,
-            username   TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            expires_at TEXT NOT NULL
-        )
-    """)
-
-    # ── Seed default owner account (password: changeme) ──
-    pw_hash = hash_password("changeme")
-    c.execute("""
-        INSERT OR IGNORE INTO users (username, password, full_name, role)
-        VALUES ('owner', ?, 'Business Owner', 'owner')
-    """, (pw_hash,))
-
-    # ── Seed properties from known data ──
-    for short, full, price, mort, m_mort, pdate in [
-        ("104 Dane",  "104 Dane Road",      550000, 412482, 0,      "2021-05-07"),
-        ("53 Ampth",  "53 Ampthill Way",    160000, 114906, 549.54, "2024-10-31"),
-        ("26 Ampth",  "26 Ampthill Way",    165000, 123750, 0,      "2025-07-26"),
-    ]:
-        c.execute("""
-            INSERT OR IGNORE INTO properties
-                (short_name, full_address, purchase_price, mortgage, monthly_mortgage, purchase_date)
-            VALUES (?,?,?,?,?,?)
-        """, (short, full, price, mort, m_mort, pdate))
-
-    conn.commit()
-    conn.close()
-    print("✅ Database initialised.")
-
-init_db()
+schema.init_db()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTH HELPERS (stub — full login added in later module)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_session(token: str | None) -> dict | None:
-    """Return the logged-in user dict for a valid, unexpired session token."""
-    if not token:
-        return None
-    rows = q("""SELECT u.* FROM sessions s
-                JOIN users u ON u.username = s.username
-                WHERE s.token = ?
-                  AND s.expires_at > datetime('now')
-                  AND u.is_active = 1""",
-             (token,), fetch=True)
-    return dict(rows[0]) if rows else None
 
-def require_login(token: str | None):
-    """Redirect to login if not authenticated."""
-    user = get_session(token)
-    if not user:
-        return RedirectResponse("/login", status_code=303), None
-    return None, user
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HTML SHELL
 # ══════════════════════════════════════════════════════════════════════════════
 
-SALES_CATS = [
-    "Digital Printing", "Other D&P", "Instant Prints", "Reprint/Enlarge",
-    "Internet Orders", "Passport", "Film Media", "Graphic Design",
-    "Large Format", "Toner/ Laser Output", "Batteries", "Frames & Albums",
-    "Photogifts", "Backup to Media", "DVD Transfer", "Studio",
-    "Sundry", "Promotions", "RCS (STD VAT)", "RCS (ZERO)",
-    "Photobooks", "TYPE B Sales"
-]
 
-def page(title: str, content: str, user: dict, active: str = "") -> str:
-    role     = user.get("role", "staff")
-    name     = user.get("full_name") or user.get("username", "")
-    store    = user.get("store_name") or ""
-    is_owner = role == "owner"
-    is_mgr   = role in ("owner", "manager")
-
-    # Nav items: (label, href, icon, min_role)
-    nav = [
-        ("Dashboard",   "/",              "&#11035;", "staff"),
-        ("My Profile",  "/my-profile",    "&#128100;","staff"),
-        ("Sales",       "/sales",         "&#128200;","staff"),
-        ("Invoices",    "/invoices",      "&#129534;","staff"),
-        ("Staff",       "/staff",         "&#128100;","manager"),
-        ("Rota",        "/rota",          "&#128197;","manager"),
-        ("Timesheets",  "/timesheets",    "&#9200;",  "manager"),
-        ("Property",    "/property",      "&#127968;","owner"),
-        ("Settings",    "/settings",      "&#9881;",  "owner"),
-    ]
-
-    nav_html = ""
-    for label, href, icon, min_role in nav:
-        if min_role == "owner"   and not is_owner: continue
-        if min_role == "manager" and not is_mgr:   continue
-        active_cls = "bg-white/15 font-black" if active == label.lower() else "hover:bg-white/10"
-        nav_html += f"<a href='{href}' class='flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition {active_cls}'>{icon} {label}</a>"
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title} — BusinessVault</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;900&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-  <style>
-    body {{ font-family: 'DM Sans', sans-serif; }}
-    .mono {{ font-family: 'DM Mono', monospace; }}
-    ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
-    ::-webkit-scrollbar-track {{ background: #f1f5f9; }}
-    ::-webkit-scrollbar-thumb {{ background: #cbd5e1; border-radius: 3px; }}
-    .card {{ background: white; border-radius: 16px; border: 1px solid #e2e8f0; padding: 24px; }}
-    .btn-primary {{ background:#1e3a5f; color:white; font-weight:700; padding:8px 20px; border-radius:10px; font-size:14px; transition:all .15s; display:inline-block; }}
-    .btn-primary:hover {{ background:#16304f; }}
-    .btn-secondary {{ background:#f1f5f9; color:#334155; font-weight:700; padding:8px 20px; border-radius:10px; font-size:14px; transition:all .15s; display:inline-block; }}
-    .btn-secondary:hover {{ background:#e2e8f0; }}
-    .btn-danger {{ background:#fee2e2; color:#dc2626; font-weight:700; padding:8px 20px; border-radius:10px; font-size:14px; transition:all .15s; display:inline-block; }}
-    .btn-danger:hover {{ background:#fecaca; }}
-    .btn-success {{ background:#dcfce7; color:#16a34a; font-weight:700; padding:8px 20px; border-radius:10px; font-size:14px; transition:all .15s; display:inline-block; }}
-    .btn-success:hover {{ background:#bbf7d0; }}
-    .badge-paid {{ background:#dcfce7; color:#16a34a; font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; }}
-    .badge-overdue {{ background:#fee2e2; color:#dc2626; font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; }}
-    .badge-partial {{ background:#fef3c7; color:#d97706; font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; }}
-    .badge-unpaid {{ background:#f1f5f9; color:#64748b; font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; }}
-    .tbl {{ width:100%; border-collapse:collapse; font-size:13px; }}
-    .tbl th {{ background:#0f2942; color:white; padding:10px 12px; text-align:left; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; white-space:nowrap; }}
-    .tbl td {{ padding:10px 12px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }}
-    .tbl tr:hover td {{ background:#f8fafc; }}
-    .tbl tr:last-child td {{ border-bottom:none; }}
-    input, select, textarea {{
-      width:100%; border:1px solid #e2e8f0; border-radius:8px;
-      padding:8px 12px; font-size:14px; font-family:'DM Sans',sans-serif;
-      outline:none; transition:border .15s; background:white;
-    }}
-    input:focus, select:focus, textarea:focus {{ border-color:#1e3a5f; }}
-    input[type=number]::-webkit-outer-spin-button,
-    input[type=number]::-webkit-inner-spin-button {{ -webkit-appearance:none; margin:0; }}
-    input[type=number] {{ -moz-appearance:textfield; }}
-    label {{ font-size:12px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:.05em; display:block; margin-bottom:4px; }}
-    .flash-success {{ background:#dcfce7; border:1px solid #86efac; color:#15803d; padding:12px 16px; border-radius:10px; font-size:14px; font-weight:600; }}
-    .flash-error   {{ background:#fee2e2; border:1px solid #fca5a5; color:#dc2626; padding:12px 16px; border-radius:10px; font-size:14px; font-weight:600; }}
-  </style>
-</head>
-<body class="bg-slate-100 min-h-screen">
-
-  <!-- Sidebar -->
-  <div class="fixed top-0 left-0 h-full w-52 z-40"
-       style="background:linear-gradient(180deg,#0f2942 0%,#1e3a5f 100%);">
-    <div class="p-5 border-b border-white/10">
-      <div class="text-white font-black text-lg tracking-tight">BusinessVault</div>
-      <div class="text-blue-300 text-xs font-semibold mt-0.5">Maukbs Ltd</div>
-    </div>
-    <nav class="p-3 space-y-1 text-white">
-      {nav_html}
-    </nav>
-    <div class="absolute bottom-0 left-0 right-0 p-4 border-t border-white/10">
-      <div class="text-white text-xs font-bold truncate">{name}</div>
-      <div class="text-blue-300 text-xs capitalize">{role}{' · ' + store if store else ''}</div>
-      <a href="/logout" class="text-blue-300 hover:text-white text-xs mt-1 inline-block transition">Sign out →</a>
-    </div>
-  </div>
-
-  <!-- Main content -->
-  <div class="ml-52 min-h-screen">
-    <div class="max-w-7xl mx-auto p-6 space-y-6">
-      {content}
-    </div>
-  </div>
-
-</body>
-</html>"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1577,6 +1181,12 @@ def serve_pdf(
 # ── PDF extract endpoint (AJAX) ──────────────────────────────────────────────
 
 from fastapi.responses import JSONResponse
+from core.db import DB_FILE, db, q
+from core.constants import STORE_GPS, GEOFENCE_RADIUS_M, SALES_CATS
+from core.security import (hash_password, verify_password,
+                           get_session, require_login)
+from core.layout import page
+from core import schema
 
 @app.post("/invoices/extract-pdf")
 async def extract_pdf_ajax(request: Request, session: str | None = Cookie(default=None)):
@@ -2618,6 +2228,12 @@ def pay_overview(session: str | None = Cookie(default=None)):
 
 import shutil
 from fastapi.responses import FileResponse
+from core.db import DB_FILE, db, q
+from core.constants import STORE_GPS, GEOFENCE_RADIUS_M, SALES_CATS
+from core.security import (hash_password, verify_password,
+                           get_session, require_login)
+from core.layout import page
+from core import schema
 from docx import Document as DocxDocument
 from docx.shared import Pt
 import io
