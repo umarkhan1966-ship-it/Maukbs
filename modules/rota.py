@@ -547,6 +547,11 @@ def rota_whatsapp(
     redir, user = require_login(session)
     if redir: return redir
 
+    if not store:
+        store = user.get("store_name") or "Uxbridge"
+    if not week_start:
+        week_start = get_week_start()
+
     week_dates = get_week_dates(week_start)
     week_end   = week_dates[-1]
     rota = get_or_create_rota(store, week_start)
