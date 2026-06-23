@@ -8,6 +8,7 @@ All other modules will be added on top of this file.
 import sqlite3
 import hashlib
 import os
+import secrets
 from datetime import datetime
 from fastapi import FastAPI, Request, Form, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -39,6 +40,40 @@ def q(sql, params=(), fetch=False):
     conn.commit()
     conn.close()
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PASSWORD HASHING (salted PBKDF2 — no external dependency)
+# ══════════════════════════════════════════════════════════════════════════════
+
+PBKDF2_ITERATIONS = 200_000
+
+def hash_password(pw: str) -> str:
+    """Return a salted PBKDF2 hash string: pbkdf2_sha256$iters$salt$hash."""
+    salt = secrets.token_bytes(16)
+    dk   = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
+
+def verify_password(pw: str, stored: str) -> bool:
+    """Verify a password against a stored hash.
+
+    Supports the new salted PBKDF2 format and falls back to the legacy
+    unsalted SHA-256 hashes so existing accounts keep working until they
+    log in once (login upgrades them automatically)."""
+    if not stored:
+        return False
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters, salt_hex, hash_hex = stored.split("$")
+            dk = hashlib.pbkdf2_hmac("sha256", pw.encode(),
+                                     bytes.fromhex(salt_hex), int(iters))
+            return secrets.compare_digest(dk.hex(), hash_hex)
+        except Exception:
+            return False
+    # Legacy unsalted SHA-256
+    legacy = hashlib.sha256(pw.encode()).hexdigest()
+    return secrets.compare_digest(legacy, stored)
+
 
 def init_db():
     conn = db()
@@ -239,8 +274,18 @@ def init_db():
         )
     """)
 
+    # ── Sessions (server-side login tokens) ──
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token      TEXT PRIMARY KEY,
+            username   TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL
+        )
+    """)
+
     # ── Seed default owner account (password: changeme) ──
-    pw_hash = hashlib.sha256("changeme".encode()).hexdigest()
+    pw_hash = hash_password("changeme")
     c.execute("""
         INSERT OR IGNORE INTO users (username, password, full_name, role)
         VALUES ('owner', ?, 'Business Owner', 'owner')
@@ -270,10 +315,14 @@ init_db()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_session(token: str | None) -> dict | None:
-    """Return user dict if token is valid, else None."""
+    """Return the logged-in user dict for a valid, unexpired session token."""
     if not token:
         return None
-    rows = q("SELECT * FROM users WHERE username=? AND is_active=1",
+    rows = q("""SELECT u.* FROM sessions s
+                JOIN users u ON u.username = s.username
+                WHERE s.token = ?
+                  AND s.expires_at > datetime('now')
+                  AND u.is_active = 1""",
              (token,), fetch=True)
     return dict(rows[0]) if rows else None
 
@@ -444,7 +493,7 @@ def login_page(error: str = ""):
         </button>
       </form>
     </div>
-    <p class="text-center text-xs text-slate-400 mt-6">Default: owner / changeme</p>
+    <p class="text-center text-xs text-slate-400 mt-6">Maukbs Ltd · Authorised users only</p>
   </div>
 </body>
 </html>"""
@@ -452,18 +501,34 @@ def login_page(error: str = ""):
 
 @app.post("/login")
 def do_login(username: str = Form(...), password: str = Form(...)):
-    pw_hash = hashlib.sha256(password.encode()).hexdigest()
-    rows    = q("SELECT * FROM users WHERE username=? AND password=? AND is_active=1",
-                (username, pw_hash), fetch=True)
-    if not rows:
+    rows = q("SELECT * FROM users WHERE username=? AND is_active=1",
+             (username,), fetch=True)
+    user = dict(rows[0]) if rows else None
+    if not user or not verify_password(password, user["password"]):
         return RedirectResponse("/login?error=Invalid+username+or+password", status_code=303)
+
+    # Transparently upgrade legacy unsalted hashes on successful login.
+    if not user["password"].startswith("pbkdf2_sha256$"):
+        q("UPDATE users SET password=? WHERE username=?",
+          (hash_password(password), username))
+
+    # Clear out expired sessions, then issue a fresh random token.
+    q("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+    token = secrets.token_urlsafe(32)
+    q("INSERT INTO sessions (token, username, expires_at) "
+      "VALUES (?, ?, datetime('now', '+7 days'))",
+      (token, username))
+
     resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie("session", username, httponly=True, max_age=86400*7)
+    resp.set_cookie("session", token, httponly=True, samesite="lax",
+                    max_age=86400 * 7)
     return resp
 
 
 @app.get("/logout")
-def do_logout():
+def do_logout(session: str | None = Cookie(default=None)):
+    if session:
+        q("DELETE FROM sessions WHERE token=?", (session,))
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("session")
     return resp
