@@ -1855,17 +1855,6 @@ def ensure_staff_tables():
         )
     """)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS staff_documents (
-            doc_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            staff_id      INTEGER NOT NULL,
-            doc_type      TEXT,
-            file_path     TEXT,
-            uploaded_at   TEXT DEFAULT (datetime('now')),
-            notes         TEXT,
-            FOREIGN KEY (staff_id) REFERENCES staff_profiles(staff_id)
-        )
-    """)
-    c.execute("""
         CREATE TABLE IF NOT EXISTS leave_entitlements (
             entitlement_id   INTEGER PRIMARY KEY AUTOINCREMENT,
             staff_id         INTEGER NOT NULL,
@@ -6063,17 +6052,8 @@ def ensure_sales_tables():
             created_at     TEXT DEFAULT (datetime('now'))
         )
     """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sales_targets (
-            target_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            store_name     TEXT NOT NULL,
-            year           INTEGER NOT NULL,
-            month          INTEGER NOT NULL,
-            target_amount  REAL DEFAULT 0,
-            ly_actual      REAL DEFAULT 0,
-            UNIQUE(store_name, year, month)
-        )
-    """)
+    # Note: sales_targets is defined authoritatively in init_db() (with the
+    # target_pct column) — it is intentionally not redefined here.
     conn.commit()
     conn.close()
 
