@@ -28,14 +28,21 @@ def extract_pdf_data(pdf_bytes: bytes) -> dict:
         lines = text.split("\n")
         full  = text.lower()
 
-        # Supplier name — usually first non-empty line or line before "Invoice"
-        for line in lines[:8]:
-            line = line.strip()
-            if len(line) > 3 and not any(w in line.lower() for w in
-               ["invoice", "tax", "vat", "date", "ltd", "limited", "plc"]):
-                result["supplier_name"] = line
+        # Supplier name — a line with a company suffix is the strongest signal,
+        # otherwise fall back to the first meaningful (non-label) line.
+        for line in lines[:10]:
+            s = line.strip()
+            if any(w in s.lower() for w in
+                   ["ltd", "limited", "plc", "llp", "& co", "group", "services"]):
+                result["supplier_name"] = s
                 break
-        # Also try lines containing the company name near "from" or at very top
+        if not result.get("supplier_name"):
+            for line in lines[:6]:
+                s = line.strip()
+                if len(s) > 3 and not any(w in s.lower() for w in
+                   ["invoice", "tax", "vat", "date", "statement", "remittance"]):
+                    result["supplier_name"] = s
+                    break
         if not result.get("supplier_name") and lines:
             result["supplier_name"] = lines[0].strip()
 
@@ -75,10 +82,12 @@ def extract_pdf_data(pdf_bytes: bytes) -> dict:
                     result["invoice_date_raw"] = raw
                 break
 
-        # Gross / total amount
+        # Gross / total amount — try the most specific "final total" labels first,
+        # and use a lookbehind so plain "total" never matches inside "subtotal".
         amount_patterns = [
-            r"(?:total|gross|amount\s*due|total\s*due|balance\s*due|total\s*payable)[:\s£]+([0-9,]+\.?[0-9]*)",
-            r"(?:total\s*inc\.?\s*vat|total\s*including\s*vat)[:\s£]+([0-9,]+\.?[0-9]*)",
+            r"(?:grand\s*total|total\s*due|balance\s*due|amount\s*due|total\s*payable)[:\s£]+([0-9,]+\.[0-9]{2})",
+            r"(?:total\s*inc\.?\s*vat|total\s*including\s*vat)[:\s£]+([0-9,]+\.[0-9]{2})",
+            r"(?<![a-z])total[:\s£]+([0-9,]+\.[0-9]{2})",
             r"£\s*([0-9,]+\.[0-9]{2})\s*$",
         ]
         for pat in amount_patterns:
@@ -392,7 +401,7 @@ def invoices_page(
         </div>
         <div style='display:flex;gap:10px;align-items:center;flex-wrap:wrap'>
           <input type='file' name='pdf_file' id='pdf_prefill' accept='.pdf'
-            onchange='extractPdf()'
+            form='invoiceForm' onchange='extractPdf()'
             style='flex:1;min-width:200px;border:1px solid #bae6fd;background:white;padding:5px 10px;border-radius:8px;font-size:13px'>
           <span id='pdf_status' style='font-size:12px;color:#0369a1'></span>
         </div>
@@ -404,7 +413,7 @@ def invoices_page(
         <div class='font-black text-slate-800'>{form_title}</div>
         {'<a href="' + cancel_url + '" class="btn-secondary text-xs">✕ Cancel Edit</a>' if is_edit else ''}
       </div>
-      <form action='{form_action}' method='POST' enctype='multipart/form-data'>
+      <form id='invoiceForm' action='{form_action}' method='POST' enctype='multipart/form-data'>
         <input type='hidden' name='ledger' value='{ledger}'>
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(180px,1fr))'>
           {seq_field}
@@ -459,11 +468,9 @@ def invoices_page(
         seq_td = f"<td class='mono' style='color:#94a3b8;font-size:11px'>{row['seq_no'] or ''}</td>" if not is_prop else ""
         pdf_td = ""
         if row.get("pdf_path"):
-            inv_pdf_url = f"/invoices/pdf/{row['invoice_id']}?ledger={ledger}"
-        if row.get("pdf_path"):
-            inv_id  = row['invoice_id']
-            pdf_url = f'/invoices/pdf/{inv_id}?ledger={ledger}'
-            pdf_td  = '<a href="#" onclick="event.stopPropagation();showPdf('' + pdf_url + '');return false;" style="color:#1e3a5f;font-size:11px;font-weight:700">&#128206; View</a>'
+            pdf_url = f"/invoices/pdf/{row['invoice_id']}?ledger={ledger}"
+            pdf_td  = (f'<a href="#" onclick="event.stopPropagation();showPdf(\'{pdf_url}\');return false;" '
+                       f'style="color:#1e3a5f;font-size:11px;font-weight:700">&#128206; View</a>')
 
         # Approve/reject buttons for pending invoices (managers/owners only)
         approval_td = ""
@@ -722,6 +729,7 @@ async def save_invoice(
     pdf_path = None
     pdf_file = form.get("pdf_file")
     if pdf_file and hasattr(pdf_file, "filename") and pdf_file.filename:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
         ext      = os.path.splitext(pdf_file.filename)[1].lower()
         filename = f"{uuid.uuid4().hex}{ext}"
         full_path = os.path.join(UPLOAD_DIR, filename)

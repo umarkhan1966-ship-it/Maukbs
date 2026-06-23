@@ -10,8 +10,7 @@ python-multipart==0.0.32       # required by FastAPI for form & file uploads
 # --- Documents & PDF ---
 python-docx==1.2.0             # staff contract / offer-letter generation
 reportlab==4.5.1               # rota PDF export, manager's reports
-pdfplumber>=0.11.0             # invoice PDF text extraction (currently NOT installed
-                               #   — install to enable the /invoices/extract-pdf feature)
+pdfplumber==0.11.10           # invoice PDF text extraction (/invoices/extract-pdf)
 
 # --- Data / utilities ---
 haversine==2.9.0               # GPS geofencing for mobile clock-in
