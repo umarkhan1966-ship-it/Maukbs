@@ -17,3 +17,24 @@ SALES_CATS = [
     "Sundry", "Promotions", "RCS (STD VAT)", "RCS (ZERO)",
     "Photobooks", "TYPE B Sales"
 ]
+
+
+DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]
+
+FULL_DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
+
+
+# Absence / leave codes shown on the rota and leave screens
+ABSENCE_TYPES = {
+    "H":  "Holiday",
+    "S":  "Sick",
+    "B":  "Bank Holiday",
+    "L":  "Lateness",
+    "AL": "Authorised Leave",
+    "UL": "Unauthorised Leave",
+    "MA": "Maternity",
+    "PA": "Paternity",
+    "JP": "Jury Service",
+    "TO": "TOIL",
+    "WFH":"Working From Home",
+}
