@@ -386,8 +386,37 @@ def invoices_page(
             opts=[(e, e or "-- Select --") for e in [""] + EXPENSE_TYPES],
             val=inv.get('expense_type',''))
     
-    # Seq no (retail only)
-    seq_field = "" if is_prop else fi('seq_no','Serial No.','number', inv.get('seq_no',''))
+    # Seq no (retail only) — auto-fill the next serial in line for new invoices
+    if is_prop:
+        seq_field = ""
+    else:
+        seq_default = inv.get('seq_no', '')
+        if not is_edit:
+            mx  = q("SELECT MAX(seq_no) AS m FROM supplier_invoices WHERE store_name=?",
+                    (loc_val,), fetch=True)
+            seq_default = ((dict(mx[0]).get('m') or 0) + 1) if mx else 1
+        seq_field = fi('seq_no', 'Serial No.', 'number', seq_default)
+
+    # Thumbnail preview of the attached PDF (edit mode, when a file is attached)
+    pdf_preview = ""
+    if is_edit and inv.get("pdf_path"):
+        thumb_url = f"/invoices/pdf-thumb/{edit_id}?ledger={ledger}"
+        full_url  = f"/invoices/pdf/{edit_id}?ledger={ledger}"
+        pdf_preview = f"""
+        <div style='margin-top:12px;display:flex;gap:14px;align-items:flex-start'>
+          <img src='{thumb_url}' alt='Invoice preview'
+               onclick="showPdf('{full_url}')"
+               style='width:96px;height:auto;border:1px solid #cbd5e1;border-radius:8px;
+                      cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.10)'>
+          <div style='font-size:12px;color:#475569'>
+            <div style='font-weight:700;color:#0369a1;margin-bottom:4px'>&#9989; Invoice PDF attached</div>
+            <a href='#' onclick="showPdf('{full_url}');return false;"
+               style='color:#1e3a5f;font-weight:700'>&#128065;&#65039; View full invoice</a>
+            <div style='color:#94a3b8;margin-top:4px'>
+              Click the thumbnail to enlarge. To replace it, choose a new file above.
+            </div>
+          </div>
+        </div>"""
 
     form_html = f"""
     <div class='card' id='invoice-form'>
@@ -408,6 +437,7 @@ def invoices_page(
         <div style='font-size:11px;color:#94a3b8;margin-top:6px'>
           Fields auto-fill from the PDF where possible. Check and adjust anything that looks wrong before saving.
         </div>
+        {pdf_preview}
       </div>
       <div class='flex justify-between items-center mb-4'>
         <div class='font-black text-slate-800'>{form_title}</div>
@@ -919,6 +949,39 @@ def serve_pdf(
     if rows and rows[0]["pdf_path"] and os.path.exists(rows[0]["pdf_path"]):
         return FileResponse(rows[0]["pdf_path"], media_type="application/pdf")
     return HTMLResponse("<p>PDF not found</p>", status_code=404)
+
+
+@router.get("/invoices/pdf-thumb/{invoice_id}")
+def serve_pdf_thumb(
+    invoice_id: int,
+    ledger:     str = "Uxbridge",
+    session:    str | None = Cookie(default=None)
+):
+    """Render the first page of an attached PDF (or return an image attachment)
+    as a small PNG thumbnail for previewing in the invoice form."""
+    redir, user = require_login(session)
+    if redir: return redir
+    table = "property_invoices" if is_property_ledger(ledger) else "supplier_invoices"
+    rows  = q(f"SELECT pdf_path FROM {table} WHERE invoice_id=?", (invoice_id,), fetch=True)
+    path  = rows[0]["pdf_path"] if rows and rows[0]["pdf_path"] else None
+    if not path or not os.path.exists(path):
+        return Response(status_code=404)
+
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        from PIL import Image
+        thumb = io.BytesIO()
+        if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+            img = Image.open(path)
+        else:  # treat as PDF — render page 1
+            import pypdfium2 as pdfium
+            pdf  = pdfium.PdfDocument(path)
+            img  = pdf[0].render(scale=2.0).to_pil()
+        img.thumbnail((600, 850))
+        img.convert("RGB").save(thumb, "PNG")
+        return Response(thumb.getvalue(), media_type="image/png")
+    except Exception:
+        return Response(status_code=404)
 
 
 @router.post("/invoices/extract-pdf")
