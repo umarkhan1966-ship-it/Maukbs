@@ -451,13 +451,17 @@ def invoices_page(
                (loc_val,), fetch=True)
         pending_count = p1[0]["n"] if p1 else 0
 
-    # Summary totals for this ledger
+    # Summary totals for this ledger. "Paid (YTD)" counts only payments dated in
+    # the current calendar year (paid_date on/after 1 Jan) — change year_start to
+    # your accounting-year start if you'd rather it run from e.g. 6 April.
+    year_start = datetime.now().strftime("%Y-01-01")
+    year_label = datetime.now().strftime("%Y")
     tots = q(f"""
         SELECT
           COUNT(*) as total_count,
           COALESCE(SUM(CASE WHEN is_paid!='Yes' AND due_date < '{today}' THEN gross_amount-amount_paid-credit_note ELSE 0 END),0) as overdue_val,
           COUNT(CASE WHEN is_paid!='Yes' AND due_date < '{today}' THEN 1 END) as overdue_count,
-          COALESCE(SUM(CASE WHEN is_paid='Yes' THEN amount_paid ELSE 0 END),0) as paid_val
+          COALESCE(SUM(CASE WHEN is_paid='Yes' AND paid_date >= '{year_start}' THEN amount_paid ELSE 0 END),0) as paid_val
         FROM {table} WHERE {loc_col}=?
     """, (loc_val,), fetch=True)
     t = dict(tots[0]) if tots else {}
@@ -487,7 +491,7 @@ def invoices_page(
         <div class='text-xs text-rose-400 mono'>£{t.get('overdue_val',0):,.2f}</div>
       </div>
       <div class='card py-3 text-center'>
-        <div class='text-xs font-bold text-slate-400 uppercase'>Total Paid (YTD)</div>
+        <div class='text-xs font-bold text-slate-400 uppercase'>Total Paid (YTD {year_label})</div>
         <div class='text-2xl font-black text-emerald-600'>£{t.get('paid_val',0):,.2f}</div>
       </div>
     </div>"""
