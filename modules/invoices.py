@@ -15,122 +15,288 @@ from core.rota_utils import (calc_paid_hours, parse_hours,
 
 router = APIRouter()
 
+from urllib.parse import quote as urlquote
+
+# Columns the invoice list can be sorted by (clickable headers). Keys are the
+# short codes used in the URL; values are the safe SQL column to sort on.
+# "added" is the default = newest invoice first.
+SORT_COLUMNS = {
+    "added":    "invoice_id",
+    "seq":      "seq_no",
+    "supplier": "supplier_name",
+    "invno":    "invoice_number",
+    "invdate":  "invoice_date",
+    "due":      "due_date",
+    "gross":    "gross_amount",
+    "balance":  "balance",
+    "status":   "is_paid",
+}
+
+
+def fmt_uk_date(s):
+    """Display a stored ISO date (yyyy-mm-dd) as UK format dd/mm/yyyy.
+    Storage stays ISO (sorts correctly); this is display-only. Returns a dash
+    for blanks and leaves anything unparseable untouched."""
+    if not s:
+        return "—"
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return str(s)
+
+
+def fmt_uk_dt(s):
+    """Display a stored timestamp as UK 'dd/mm/yyyy HH:MM'. Falls back to a plain
+    date for older date-only values, and a dash for blanks."""
+    if not s:
+        return "—"
+    try:
+        return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S").strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return fmt_uk_date(s)
+
+
+def _norm_spaces(s: str) -> str:
+    """Re-insert spaces lost by PDFs that render words with no gaps, e.g.
+    'MaukbsRealEstateLimited' -> 'Maukbs Real Estate Limited',
+    'VATNumber' -> 'VAT Number'. Only touches case boundaries so it never
+    breaks codes like 'SAI1210'."""
+    s = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', s)          # camelCase boundary
+    s = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', s)     # ACRONYMWord boundary
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _parse_date(s: str):
+    """Parse the many date shapes suppliers use into YYYY-MM-DD, or None.
+    Handles compact forms like '31May2026' as well as '31 May 2026',
+    '07/06/2026', '7 Jun 2026'."""
+    from datetime import datetime as dt
+    s = s.strip()
+    m = re.search(r'(\d{1,2})\s*([A-Za-z]{3,9})\s*(\d{4})', s)
+    if m:
+        try:
+            return dt.strptime(f"{int(m.group(1))} {m.group(2)[:3].title()} {m.group(3)}",
+                               "%d %b %Y").strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    m = re.search(r'(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})', s)
+    if m:
+        d, mo, y = m.groups()
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return dt(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return None
+
+
+# Our own company never appears as the *supplier* — these invoices are billed
+# TO us, so any name containing this is the customer and must be ignored.
+_OWN_COMPANY_HINTS = ("maukbs",)
+
+# Label patterns: each captures any inline value after the label on the SAME
+# line; if that's empty we fall back to the value in the cell directly below
+# (handles the very common two-column "label above value" invoice layout).
+_FIELD_LABELS = {
+    "invoice_number": r'^(?:tax\s+)?invoice\s*(?:no|number|num|#)\.?\s*[:\-]?\s*(.*)$',
+    "receipt_number": r'^(?:vat\s+)?receipt\s*(?:no|number|#)\.?\s*[:\-]?\s*(.*)$',
+    "invoice_date":   r'^(?:invoice\s*date|date\s*of\s*invoice|date)\s*[:\-]?\s*(.*)$',
+    "due_date":       r'^(?:due\s*date|payment\s*due)\s*[:\-]?\s*(.*)$',
+    "payment_terms":  r'^(?:payment\s*terms|terms)\s*[:\-]?\s*(.*)$',
+}
+
+
+def _layout_cells(pdf_bytes: bytes):
+    """Return (cells, page_width) where cells is a flat list of
+    (top, x0, col_index, text) reconstructed column-by-column so that label
+    and value alignment is preserved."""
+    import pdfplumber
+    from collections import defaultdict
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        page  = pdf.pages[0]
+        words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+        page_w = float(page.width or 600)
+
+    if not words:
+        return [], page_w
+
+    # Cluster x0 positions into vertical column bands.
+    xs = sorted({round(w["x0"]) for w in words})
+    bands = []
+    for x in xs:
+        if bands and x - bands[-1][1] <= 25:
+            bands[-1][1] = x
+        else:
+            bands.append([x, x])
+
+    def col_of(x):
+        x = round(x)
+        for i, (a, b) in enumerate(bands):
+            if a - 1 <= x <= b + 1:
+                return i
+        return -1
+
+    colwords = defaultdict(list)
+    for w in words:
+        colwords[col_of(w["x0"])].append(w)
+
+    cells = []
+    for ci, ws in colwords.items():
+        ws.sort(key=lambda w: (w["top"], w["x0"]))
+        row, row_top = [], None
+        groups = []
+        for w in ws:
+            if row and abs(w["top"] - row_top) <= 6:
+                row.append(w)
+            else:
+                if row:
+                    groups.append(row)
+                row, row_top = [w], w["top"]
+        if row:
+            groups.append(row)
+        for g in groups:
+            text = _norm_spaces(" ".join(x["text"] for x in g))
+            cells.append((g[0]["top"], min(x["x0"] for x in g), ci, text))
+    return cells, page_w
+
 
 def extract_pdf_data(pdf_bytes: bytes) -> dict:
-    """Try to extract invoice fields from a PDF using pdfplumber.
-    Returns a dict with whatever fields we can find — caller fills the rest manually."""
+    """Extract invoice fields from a PDF. Layout-aware: reconstructs the page
+    by columns so labels pair with the right values even in multi-column
+    invoices. Anything we cannot read confidently is simply left out, so the
+    caller (and store staff) can fill it in manually."""
     result = {}
     try:
-        import pdfplumber, io
+        import pdfplumber
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        cells, page_w = _layout_cells(pdf_bytes)
 
-        lines = text.split("\n")
-        full  = text.lower()
+        # Build per-column ordered cell lists so we can look "below" a label.
+        from collections import defaultdict
+        by_col = defaultdict(list)
+        for top, x0, ci, txt in cells:
+            by_col[ci].append((top, x0, txt))
+        for ci in by_col:
+            by_col[ci].sort(key=lambda c: c[0])
 
-        # Supplier name — a line with a company suffix is the strongest signal,
-        # otherwise fall back to the first meaningful (non-label) line.
-        for line in lines[:10]:
-            s = line.strip()
-            if any(w in s.lower() for w in
-                   ["ltd", "limited", "plc", "llp", "& co", "group", "services"]):
-                result["supplier_name"] = s
+        def looks_like_label(t):
+            low = t.lower().strip(" :-")
+            return any(re.match(p, low) for p in _FIELD_LABELS.values())
+
+        # ── Pass 1: layout-aware label -> value (inline, else cell below) ──
+        for ci, col in by_col.items():
+            for i, (top, x0, txt) in enumerate(col):
+                low = txt.lower().strip()
+                for field, pat in _FIELD_LABELS.items():
+                    if result.get(field):
+                        continue
+                    m = re.match(pat, low)
+                    if not m:
+                        continue
+                    val = (m.group(1) or "").strip(" :-")
+                    if not val and i + 1 < len(col):
+                        nxt = col[i + 1][2].strip()
+                        if not looks_like_label(nxt):
+                            val = nxt
+                    if not val:
+                        continue
+                    # Use the original (properly-cased) text for the value.
+                    if field in ("invoice_date", "due_date"):
+                        d = _parse_date(val)
+                        if d:
+                            result[field] = d
+                    elif field == "payment_terms":
+                        tm = re.search(r"\d+", val)
+                        if tm:
+                            result[field] = int(tm.group(0))
+                    else:  # invoice_number / receipt_number
+                        v = val.split()[0] if val else ""
+                        if len(v) >= 2 and any(c.isdigit() for c in v) \
+                           and "maukbs" not in v.lower():
+                            result[field] = v
+
+        # "VAT receipt number" style docs: use it as the invoice number.
+        if not result.get("invoice_number") and result.get("receipt_number"):
+            result["invoice_number"] = result["receipt_number"]
+        result.pop("receipt_number", None)
+
+        # ── Supplier name: top header block, never our own company ──
+        header = [(top, x0, txt) for (top, x0, ci, txt) in cells if top < 260]
+        header.sort(key=lambda c: (-c[1], c[0]))  # prefer right-side blocks first
+        suffixes = ("ltd", "limited", "plc", "llp", "& co", "group",
+                    "associates", "accountancy", "services")
+        def bad_name(t):
+            low = t.lower()
+            # Reject our own company, labels, and run-on address blocks — a real
+            # supplier name is short and comma-free; anything long/comma-heavy or
+            # with "c/o" is an address we must not guess at (leave blank instead).
+            return (any(h in low for h in _OWN_COMPANY_HINTS)
+                    or looks_like_label(t)
+                    or low.strip() in ("invoice", "tax invoice", "statement", "vat receipt")
+                    or bool(re.match(r'^[\d\W]', t))
+                    or "," in t or "c/o" in low or len(t) > 45 or len(t.split()) > 6)
+        # Try a name (optionally merged with the next cell carrying the suffix).
+        col_seq = defaultdict(list)
+        for top, x0, ci, txt in cells:
+            col_seq[ci].append((top, txt))
+        for ci in col_seq:
+            col_seq[ci].sort()
+        for top, x0, ci, txt in sorted(cells, key=lambda c: (-c[1], c[0])):
+            if top >= 260 or bad_name(txt):
+                continue
+            cand = txt
+            seq = col_seq[ci]
+            idx = next((k for k, (t, x) in enumerate(seq) if t == top and x == txt), None)
+            # Append a following cell that carries (or is) the legal suffix,
+            # e.g. 'Smartax Accountancy' + 'Ltd' -> 'Smartax Accountancy Ltd'.
+            if idx is not None and idx + 1 < len(seq) and not bad_name(seq[idx + 1][1]):
+                nxt = seq[idx + 1][1]
+                is_bare_suffix = nxt.lower().strip(" .") in ("ltd", "limited", "plc", "llp")
+                if is_bare_suffix or (not any(s in cand.lower() for s in suffixes)
+                                      and any(s in nxt.lower() for s in suffixes)):
+                    cand = f"{cand} {nxt}"
+            if any(s in cand.lower() for s in suffixes):
+                result["supplier_name"] = cand
                 break
         if not result.get("supplier_name"):
-            for line in lines[:6]:
-                s = line.strip()
-                if len(s) > 3 and not any(w in s.lower() for w in
-                   ["invoice", "tax", "vat", "date", "statement", "remittance"]):
-                    result["supplier_name"] = s
+            for top, x0, ci, txt in sorted(header, key=lambda c: c[0]):
+                if not bad_name(txt) and len(txt) > 3:
+                    result["supplier_name"] = txt
                     break
-        if not result.get("supplier_name") and lines:
-            result["supplier_name"] = lines[0].strip()
 
-        # Invoice number — look for "invoice no", "inv no", "invoice #", "invoice number"
-        inv_patterns = [
-            r"invoice\s*(?:no\.?|number|#)[:\s]+([A-Z0-9\-\/]+)",
-            r"inv\.?\s*(?:no\.?|#)[:\s]+([A-Z0-9\-\/]+)",
-            r"(?:^|\s)(INV[-\s]?[0-9]+)",
-        ]
-        for pat in inv_patterns:
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                result["invoice_number"] = m.group(1).strip()
-                break
-
-        # Invoice date
-        date_patterns = [
-            r"(?:invoice\s*date|date\s*of\s*invoice|date)[:\s]+([0-9]{1,2}[\s/\-][A-Za-z0-9]{1,3}[\s/\-][0-9]{2,4})",
-            r"(?:dated?)[:\s]+([0-9]{1,2}[\s/\-][A-Za-z0-9]{2,3}[\s/\-][0-9]{2,4})",
-            r"([0-9]{2}/[0-9]{2}/[0-9]{4})",
-            r"([0-9]{2}-[0-9]{2}-[0-9]{4})",
-            r"([0-9]{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+[0-9]{4})",
-        ]
-        for pat in date_patterns:
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                raw = m.group(1).strip()
-                # Try to parse and normalise to YYYY-MM-DD
-                from datetime import datetime as dt
-                for fmt in ("%d/%m/%Y","%d-%m-%Y","%d %B %Y","%d %b %Y",
-                            "%d/%m/%y","%B %d, %Y","%b %d, %Y"):
+        # ── Amounts (regex on flat text; final totals first) ──
+        def money(pats):
+            for pat in pats:
+                m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
+                if m:
                     try:
-                        result["invoice_date"] = dt.strptime(raw, fmt).strftime("%Y-%m-%d")
-                        break
-                    except: pass
-                if not result.get("invoice_date"):
-                    result["invoice_date_raw"] = raw
-                break
+                        return float(m.group(1).replace(",", ""))
+                    except Exception:
+                        pass
+            return None
 
-        # Gross / total amount — try the most specific "final total" labels first,
-        # and use a lookbehind so plain "total" never matches inside "subtotal".
-        amount_patterns = [
-            r"(?:grand\s*total|total\s*due|balance\s*due|amount\s*due|total\s*payable)[:\s£]+([0-9,]+\.[0-9]{2})",
-            r"(?:total\s*inc\.?\s*vat|total\s*including\s*vat)[:\s£]+([0-9,]+\.[0-9]{2})",
-            r"(?<![a-z])total[:\s£]+([0-9,]+\.[0-9]{2})",
-            r"£\s*([0-9,]+\.[0-9]{2})\s*$",
-        ]
-        for pat in amount_patterns:
-            m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
-            if m:
-                try:
-                    result["gross_amount"] = float(m.group(1).replace(",",""))
-                    break
-                except: pass
-
-        # VAT amount
-        vat_patterns = [
-            r"(?:vat|tax)[:\s£]+([0-9,]+\.?[0-9]*)",
-            r"(?:vat\s*@\s*20%)[:\s£]+([0-9,]+\.?[0-9]*)",
-        ]
-        for pat in vat_patterns:
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                try:
-                    result["vat_amount"] = float(m.group(1).replace(",",""))
-                    break
-                except: pass
-
-        # Net amount
-        net_patterns = [
-            r"(?:net|subtotal|sub\s*total|amount\s*ex\.?\s*vat)[:\s£]+([0-9,]+\.?[0-9]*)",
-        ]
-        for pat in net_patterns:
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                try:
-                    result["net_amount"] = float(m.group(1).replace(",",""))
-                    break
-                except: pass
-
-        # If we have gross and vat but no net, calculate it
-        if result.get("gross_amount") and result.get("vat_amount") and not result.get("net_amount"):
-            result["net_amount"] = round(result["gross_amount"] - result["vat_amount"], 2)
-
-        # Payment terms
-        terms_m = re.search(r"(?:payment\s*terms?|net)[:\s]+(\d+)\s*days?", text, re.IGNORECASE)
-        if terms_m:
-            result["payment_terms"] = int(terms_m.group(1))
+        gross = money([
+            r"(?:grand\s*total|total\s*due|balance\s*due|amount\s*due|total\s*payable|total\s*gbp)[\s:£]*([0-9,]+\.[0-9]{2})",
+            r"(?:total\s*inc\.?\s*vat|total\s*including\s*vat)[\s:£]*([0-9,]+\.[0-9]{2})",
+            r"(?<![a-z])total\s*gbp[\s:£]*([0-9,]+\.[0-9]{2})",
+        ])
+        vat = money([
+            r"total\s*vat\b.*?([0-9,]+\.[0-9]{2})",
+            r"vat\s*@?\s*\d*\.?\d*%?\b.*?([0-9,]+\.[0-9]{2})",
+        ])
+        net = money([
+            r"(?:sub\s*total|subtotal|net\s*total|amount\s*ex\.?\s*vat)[\s:£]*([0-9,]+\.[0-9]{2})",
+        ])
+        # Fill in the missing leg of gross / vat / net if two are known.
+        if gross is not None and vat is not None and net is None:
+            net = round(gross - vat, 2)
+        elif net is not None and vat is not None and gross is None:
+            gross = round(net + vat, 2)
+        if gross is not None: result["gross_amount"] = gross
+        if vat   is not None: result["vat_amount"]   = vat
+        if net   is not None: result["net_amount"]   = net
 
         result["_raw_text"] = text[:500]  # first 500 chars for debugging
 
@@ -186,7 +352,8 @@ def prop_name(store_val: str) -> str:
 
 
 def fetch_invoices(ledger: str, search: str, status: str,
-                   pg: int, page_size: int = 30):
+                   pg: int, page_size: int = 30,
+                   sort: str = "", direction: str = "desc"):
     is_prop = is_property_ledger(ledger)
     table   = "property_invoices" if is_prop else "supplier_invoices"
     loc_col = "property_name"     if is_prop else "store_name"
@@ -219,10 +386,21 @@ def fetch_invoices(ledger: str, search: str, status: str,
     total_n = total[0]["n"] if total else 0
 
     balance_expr = "COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_note,0)"
+
+    # Build a safe ORDER BY from the whitelist. No sort given => newest first.
+    col = SORT_COLUMNS.get(sort)
+    if col == "seq_no" and is_prop:   # property table has no seq_no
+        col = None
+    direction_sql = "ASC" if str(direction).lower() == "asc" else "DESC"
+    if col:
+        order_by = f"{col} {direction_sql}, invoice_id DESC"
+    else:
+        order_by = "invoice_id DESC"   # default: most recently added on top
+
     rows = q(f"""
         SELECT *, {balance_expr} AS balance
         FROM {table} {where}
-        ORDER BY due_date ASC, invoice_id DESC
+        ORDER BY {order_by}
         LIMIT ? OFFSET ?
     """, params + [page_size, (pg-1)*page_size], fetch=True) or []
 
@@ -238,6 +416,8 @@ def invoices_page(
     status:   str = "",
     pg:       int = 1,
     edit_id:  int = 0,
+    sort:     str = "",
+    dir:      str = "desc",
     msg:      str = "",
     msg_type: str = "success"
 ):
@@ -259,7 +439,7 @@ def invoices_page(
         if rows:
             edit_inv = dict(rows[0])
 
-    invoices, total_n = fetch_invoices(ledger, search, status, pg, PAGE_SIZE)
+    invoices, total_n = fetch_invoices(ledger, search, status, pg, PAGE_SIZE, sort, dir)
     total_pages = max(1, (total_n + PAGE_SIZE - 1) // PAGE_SIZE)
 
     # Pending approvals count (managers/owners only)
@@ -364,6 +544,16 @@ def invoices_page(
         paid_opts  = [("No","Unpaid"),("Yes","Paid")]
         meth_opts  = [(m, m or "-- Select --") for m in PAYMENT_METHODS]
         balance    = (inv.get("gross_amount") or 0) - (inv.get("amount_paid") or 0) - (inv.get("credit_note") or 0)
+        # DD Statement Date + Cheque Number are retail-only (the property table
+        # has no such columns). Cheque box shows only when method = Cheque.
+        dd_cheque_fields = ""
+        if not is_prop:
+            dd_cheque_fields = (
+                fi('dd_statement_date', 'DD Statement Date', 'date', inv.get('dd_statement_date',''))
+                + "<div id='chequeWrap' style=\""
+                + ("" if (inv.get('payment_method') or '') == 'Cheque' else "display:none")
+                + "\"><label>Cheque Number</label>"
+                + f"<input type='text' name='cheque_number' value='{inv.get('cheque_number') or ''}'></div>")
         payment_fields = f"""
         <div class='col-span-2' style='border-top:1px solid #e2e8f0;padding-top:12px;margin-top:4px'>
           <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-3'>Payment Details</div>
@@ -373,6 +563,7 @@ def invoices_page(
             {fi('payment_method', 'Payment Method',   opts=meth_opts,  val=inv.get('payment_method',''))}
             {fi('amount_paid',    'Amount Paid (£)',  'number',        inv.get('amount_paid',0))}
             {fi('credit_note',    'Credit Note (£)',  'number',        inv.get('credit_note',0))}
+            {dd_cheque_fields}
           </div>
           <div class='text-xs text-slate-400 mt-2 mono'>
             Balance outstanding: <strong class='{'text-rose-600' if balance > 0 else 'text-emerald-600'}'>£{balance:,.2f}</strong>
@@ -392,10 +583,43 @@ def invoices_page(
     else:
         seq_default = inv.get('seq_no', '')
         if not is_edit:
-            mx  = q("SELECT MAX(seq_no) AS m FROM supplier_invoices WHERE store_name=?",
-                    (loc_val,), fetch=True)
+            # Serial numbers are one shared sequence across BOTH retail stores,
+            # so the next number is the highest in the whole table + 1 (not
+            # per-store, which could clash with a number the other store used).
+            mx  = q("SELECT MAX(seq_no) AS m FROM supplier_invoices", (), fetch=True)
             seq_default = ((dict(mx[0]).get('m') or 0) + 1) if mx else 1
         seq_field = fi('seq_no', 'Serial No.', 'number', seq_default)
+
+    # ── Freed serial numbers available to reuse (gaps left by deleted invoices).
+    #    Owner only — store staff (and managers) just take the next number,
+    #    keeping their screen simple and avoiding confusion. ──
+    freed_html = ""
+    if (not is_prop) and (not is_edit) and user.get("role") == "owner":
+        present = sorted({int(r["seq_no"]) for r in
+                          q("SELECT seq_no FROM supplier_invoices WHERE seq_no IS NOT NULL",
+                            (), fetch=True)})
+        if present:
+            ps = set(present)
+            gaps = [n for n in range(present[0], present[-1]) if n not in ps]
+            if gaps:
+                chips = "".join(
+                    f"<button type='button' onclick=\"document.querySelector('[name=seq_no]').value={g}\" "
+                    f"style='background:#ecfdf5;border:1px solid #6ee7b7;color:#047857;border-radius:6px;"
+                    f"padding:2px 8px;margin:2px;font-size:12px;font-weight:700;cursor:pointer'>{g}</button>"
+                    for g in gaps[:40])
+                more = f" <span style='color:#94a3b8;font-size:12px'>+{len(gaps)-40} more</span>" if len(gaps) > 40 else ""
+                freed_html = (
+                    "<div style='grid-column:1/-1;background:#f0fdf4;border:1px solid #bbf7d0;"
+                    "border-radius:8px;padding:8px 12px;margin-bottom:4px'>"
+                    "<span style='font-size:12px;font-weight:700;color:#047857'>♻️ Freed numbers available to reuse "
+                    "<span style='font-weight:400;color:#64748b'>(click to use, or ignore to take the next number)</span>:</span> "
+                    f"{chips}{more}</div>")
+
+    # ── Owner-only "Sent to Accountant" date (retail, edit mode) ──
+    accountant_field = ""
+    if is_edit and (not is_prop) and user.get("role") == "owner":
+        accountant_field = fi('accountant_sent_date', 'Sent to Accountant',
+                              'date', inv.get('accountant_sent_date', ''))
 
     # Thumbnail preview of the attached PDF (edit mode, when a file is attached)
     pdf_preview = ""
@@ -418,8 +642,18 @@ def invoices_page(
           </div>
         </div>"""
 
+    # ── Audit line (edit mode): who entered it / who last edited it, and when ──
+    audit_html = ""
+    if is_edit:
+        bits = [f"Entered by <b>{inv.get('submitted_by') or '—'}</b> on {fmt_uk_dt(inv.get('created_at'))}"]
+        if inv.get("updated_at"):
+            bits.append(f"last edited by <b>{inv.get('updated_by') or '—'}</b> on {fmt_uk_dt(inv.get('updated_at'))}")
+        audit_html = ("<div style='font-size:11px;color:#94a3b8;margin-bottom:10px'>🕒 "
+                      + " &nbsp;·&nbsp; ".join(bits) + "</div>")
+
     form_html = f"""
     <div class='card' id='invoice-form'>
+      {audit_html}
       <!-- PDF Upload — one file does both: auto-fills fields AND saves with invoice -->
       <div style='background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:12px 16px;margin-bottom:16px'>
         <div style='font-size:13px;font-weight:700;color:#0369a1;margin-bottom:8px'>
@@ -435,7 +669,10 @@ def invoices_page(
           <span id='pdf_status' style='font-size:12px;color:#0369a1'></span>
         </div>
         <div style='font-size:11px;color:#94a3b8;margin-top:6px'>
-          Fields auto-fill from the PDF where possible. Check and adjust anything that looks wrong before saving.
+          Fields auto-fill from the PDF where possible.
+          <span style='background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:1px 5px'>green = auto-filled</span>
+          <span style='background:#fffbeb;border:1px solid #f59e0b;border-radius:4px;padding:1px 5px'>amber = please check / enter by hand</span>
+          Always check before saving.
         </div>
         {pdf_preview}
       </div>
@@ -446,6 +683,7 @@ def invoices_page(
       <form id='invoiceForm' action='{form_action}' method='POST' enctype='multipart/form-data'>
         <input type='hidden' name='ledger' value='{ledger}'>
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(180px,1fr))'>
+          {freed_html}
           {seq_field}
           {fi('supplier_name',  'Supplier Name',    val=inv.get('supplier_name',''),  req=True)}
           {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''))}
@@ -456,6 +694,7 @@ def invoices_page(
           {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0))}
           {fi('payment_terms',  'Terms (days)',     'number', inv.get('payment_terms',''))}
           {prop_or_store_field}
+          {accountant_field}
           <!-- PDF attached via the strip above -->
           <div style='grid-column:1/-1'>
             {fi('comments','Comments', val=inv.get('comments',''))}
@@ -523,8 +762,8 @@ def invoices_page(
           {seq_td}
           <td style='font-weight:700;color:#0f172a'>{row['supplier_name']}</td>
           <td class='mono' style='font-size:12px'>{row['invoice_number'] or '—'}</td>
-          <td class='mono' style='font-size:12px;color:#64748b'>{row['invoice_date'] or '—'}</td>
-          <td class='mono' style='font-size:12px;color:#64748b'>{row['due_date'] or '—'}</td>
+          <td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(row['invoice_date'])}</td>
+          <td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(row['due_date'])}</td>
           <td class='mono' style='font-weight:700'>£{row['gross_amount']:,.2f}</td>
           <td class='mono' style='color:#16a34a'>{'£'+f'{paid:,.2f}' if paid else '—'}</td>
           <td class='mono' style='font-weight:700;color:{"#dc2626" if balance > 0 else "#16a34a"}'>£{balance:,.2f}</td>
@@ -534,36 +773,57 @@ def invoices_page(
           <td>{approval_td}</td>
         </tr>"""
 
-    # Seq header only for retail
-    seq_th = "<th>Serial</th>" if not is_prop else ""
+    # Clickable, server-side sortable column headers. Clicking toggles
+    # asc/desc; a ▲/▼ marks the active column.
+    def sort_th(label, key):
+        active = (sort == key)
+        nxt   = "asc" if (active and dir == "desc") else ("desc" if active else "asc")
+        arrow = " ▼" if (active and dir == "desc") else (" ▲" if active else "")
+        qs = f"/invoices?ledger={urlquote(ledger)}&sort={key}&dir={nxt}"
+        if search: qs += f"&search={urlquote(search)}"
+        if status: qs += f"&status={urlquote(status)}"
+        qs += "#list"
+        return (f"<th style='cursor:pointer;white-space:nowrap'>"
+                f"<a href='{qs}' style='color:inherit;text-decoration:none'>{label}{arrow}</a></th>")
+
+    seq_th = sort_th("Serial", "seq") if not is_prop else ""
+    headers_html = (
+        sort_th("Supplier", "supplier") + sort_th("Invoice No.", "invno")
+        + sort_th("Inv. Date", "invdate") + sort_th("Due Date", "due")
+        + sort_th("Gross", "gross") + "<th>Paid</th>"
+        + sort_th("Balance", "balance") + sort_th("Status", "status")
+        + "<th>Method</th><th>PDF</th>"
+    )
 
     # Pagination
     pag_html = ""
     if total_pages > 1:
-        base = f"/invoices?ledger={ledger}&search={search}&status={status}&page="
+        base = f"/invoices?ledger={ledger}&search={search}&status={status}&sort={sort}&dir={dir}&page="
         pag_html = "<div class='flex gap-2 flex-wrap justify-center'>"
         for p in range(1, total_pages + 1):
             cls = "btn-primary" if p == pg else "btn-secondary"
             pag_html += f"<a href='{base}{p}' class='{cls}' style='padding:6px 14px'>{p}</a>"
         pag_html += "</div>"
 
+    reset_link = (f"<a href='/invoices?ledger={urlquote(ledger)}#list' "
+                  f"style='color:#fbbf24;font-size:12px;text-decoration:underline;margin-right:14px'>"
+                  f"↺ Default view (newest first)</a>") if sort else ""
     list_html = f"""
-    <div class='card' style='padding:0;overflow:hidden'>
+    <div class='card' id='list' style='padding:0;overflow:hidden'>
       <div style='padding:16px 20px;background:#0f2942;display:flex;justify-content:space-between;align-items:center'>
         <div style='color:white;font-weight:700;font-size:14px'>
           {total_n} invoices
           {'· <span style="color:#fbbf24">'+str(t.get('overdue_count',0))+' overdue</span>' if t.get('overdue_count',0) > 0 else ''}
         </div>
-        <div style='color:#93c5fd;font-size:12px'>Click any row to edit</div>
+        <div style='display:flex;align-items:center'>
+          {reset_link}<span style='color:#93c5fd;font-size:12px'>Click a column title to sort · click any row to edit</span>
+        </div>
       </div>
       <div style='overflow-x:auto'>
         <table class='tbl'>
           <thead>
             <tr>
-              {seq_th}
-              <th>Supplier</th><th>Invoice No.</th><th>Inv. Date</th>
-              <th>Due Date</th><th>Gross</th><th>Paid</th>
-              <th>Balance</th><th>Status</th><th>Method</th><th>PDF</th>
+              {seq_th}{headers_html}
             </tr>
           </thead>
           <tbody>{rows_html if rows_html else "<tr><td colspan='10' style='text-align:center;padding:32px;color:#94a3b8'>No invoices found</td></tr>"}</tbody>
@@ -590,6 +850,15 @@ def invoices_page(
       const idate = document.querySelector('[name="invoice_date"]');
       const ddate = document.querySelector('[name="due_date"]');
       const terms = document.querySelector('[name="payment_terms"]');
+
+      // Show the Cheque Number box only when the payment method is Cheque.
+      const pmeth = document.querySelector('[name="payment_method"]');
+      const chequeWrap = document.getElementById('chequeWrap');
+      function toggleCheque() {
+        if (chequeWrap) chequeWrap.style.display = (pmeth && pmeth.value === 'Cheque') ? '' : 'none';
+      }
+      if (pmeth) pmeth.addEventListener('change', toggleCheque);
+      toggleCheque();
 
       // Auto-calc net = gross - vat
       function recalcNet() {
@@ -650,10 +919,15 @@ def invoices_page(
         fill('supplier_name',  data.supplier_name);
         fill('invoice_number', data.invoice_number);
         fill('invoice_date',   data.invoice_date);
+        fill('due_date',       data.due_date);
         fill('gross_amount',   data.gross_amount);
         fill('vat_amount',     data.vat_amount);
         fill('net_amount',     data.net_amount);
         fill('payment_terms',  data.payment_terms);
+
+        // If the PDF gave us a due date, don't let the auto-recalc overwrite it.
+        const dd = document.querySelector('[name="due_date"]');
+        if (dd && data.due_date) dd.dataset.manual = '1';
 
         // Trigger calculations for any fields NOT found in PDF
         const gross = document.querySelector('[name="gross_amount"]');
@@ -661,9 +935,43 @@ def invoices_page(
         const idate = document.querySelector('[name="invoice_date"]');
         if (idate) idate.dispatchEvent(new Event('change'));
 
+        // ── Highlight anything the system could NOT fill, so staff don't
+        //    assume it was completed correctly. Amber = please check/enter. ──
+        const KEY_FIELDS = {
+          supplier_name:'Supplier Name', invoice_number:'Invoice Number',
+          invoice_date:'Invoice Date',   due_date:'Due Date',
+          gross_amount:'Gross Amount',   vat_amount:'VAT Amount',
+          net_amount:'Net Amount'
+        };
+        let missing = 0;
+        for (const name of Object.keys(KEY_FIELDS)) {
+          const el = document.querySelector('[name="' + name + '"]');
+          if (!el) continue;
+          const v = (el.value || '').trim();
+          const blank = v === '' || v === '0' || v === '0.00' || parseFloat(v) === 0;
+          if (blank) {
+            el.style.background = '#fffbeb';
+            el.style.border     = '2px solid #f59e0b';
+            el.dataset.needsInput = '1';
+            missing++;
+            // Clear the amber as soon as a staff member fills it in.
+            el.addEventListener('input', function clr() {
+              el.style.background = ''; el.style.border = '';
+              el.dataset.needsInput = ''; el.removeEventListener('input', clr);
+            });
+          }
+        }
+
         let found = Object.keys(data).filter(k => !k.startsWith('_') && data[k]).length;
-        status.textContent = '✅ ' + found + ' fields found — please check and adjust as needed';
-        status.style.color = '#16a34a';
+        if (missing) {
+          status.innerHTML = '✅ ' + found + ' fields auto-filled (green). ' +
+            '<span style="color:#b45309;font-weight:700">' + missing +
+            ' field(s) highlighted amber need to be entered/checked by hand.</span>';
+          status.style.color = '#16a34a';
+        } else {
+          status.textContent = '✅ ' + found + ' fields auto-filled — please check before saving';
+          status.style.color = '#16a34a';
+        }
 
       } catch(e) {
         status.textContent = '❌ Could not read PDF — please fill manually';
@@ -721,6 +1029,8 @@ def invoices_page(
         {ledger_opts}
       </select>
       <a href='/invoices/recent-payments' class='btn-secondary' style='margin-left:auto'>📋 Recent Payments</a>
+      {"<a href='/invoices/dd-collection' class='btn-secondary'>🏦 DD Collection Check</a>" if user.get('role') == 'owner' else ''}
+      {"<a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send to Accountant</a>" if user.get('role') == 'owner' else ''}
     </div>"""
 
     content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, list_html, js])
@@ -783,12 +1093,27 @@ async def save_invoice(
     credit     = fnum("credit_note")
     seq_no     = fint("seq_no")
     exp_type   = fv("expense_type") or None
+    dd_stmt    = fv("dd_statement_date") or None
+    chq_no     = fv("cheque_number") or None
+    acct_sent  = fv("accountant_sent_date") or None
 
     if not supplier:
         return RedirectResponse(f"/invoices?ledger={ledger}&msg=Supplier+name+is+required&msg_type=error",
                                 status_code=303)
 
     from urllib.parse import quote as urlquote
+
+    # ── Serial number must stay unique across the shared sequence (retail) ──
+    if not is_prop and seq_no:
+        clash = q("SELECT invoice_id, store_name FROM supplier_invoices WHERE seq_no=? AND invoice_id<>?",
+                  (seq_no, invoice_id), fetch=True)
+        if clash:
+            where_used = clash[0]["store_name"]
+            return RedirectResponse(
+                f"/invoices?ledger={ledger}&msg="
+                + urlquote(f"Serial No. {seq_no} is already used (in {where_used}). "
+                           f"Please use a different number.")
+                + "&msg_type=error", status_code=303)
 
     # ── Approval status based on role ──
     role = user.get("role", "staff")
@@ -860,25 +1185,28 @@ async def save_invoice(
     elif warning_note:
         comments = warning_note.strip(" | ")
 
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     if invoice_id == 0:
         # New invoice
         if is_prop:
             q(f"""INSERT OR IGNORE INTO {table}
                 (property_name, supplier_name, invoice_number, invoice_date,
                  expense_type, gross_amount, vat_amount, net_amount, due_date,
-                 payment_terms, comments, is_paid, pdf_path)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 payment_terms, comments, is_paid, pdf_path, submitted_by, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (loc_val, supplier, inv_no, inv_date, exp_type,
-               gross, vat, net, due_date, terms, comments, is_paid, pdf_path))
+               gross, vat, net, due_date, terms, comments, is_paid, pdf_path,
+               submitted_by, now_ts))
         else:
             q(f"""INSERT OR IGNORE INTO {table}
                 (store_name, seq_no, supplier_name, invoice_number, invoice_date,
                  gross_amount, vat_amount, net_amount, due_date, payment_terms,
-                 comments, is_paid, pdf_path, approval_status, submitted_by)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 comments, is_paid, pdf_path, approval_status, submitted_by, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (loc_val, seq_no, supplier, inv_no, inv_date,
                gross, vat, net, due_date, terms, comments, is_paid, pdf_path,
-               approval_status, submitted_by))
+               approval_status, submitted_by, now_ts))
         if approval_status == "pending":
             msg = f"Invoice submitted for approval — {supplier} {inv_no}"
         else:
@@ -891,22 +1219,31 @@ async def save_invoice(
                 expense_type=?, gross_amount=?, vat_amount=?, net_amount=?,
                 due_date=?, payment_terms=?, comments=?, is_paid=?,
                 paid_date=?, payment_method=?, amount_paid=?,
+                updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([supplier, inv_no, inv_date, exp_type, gross, vat, net,
-                due_date, terms, comments, is_paid, paid_date, pay_method, credit]
+                due_date, terms, comments, is_paid, paid_date, pay_method, credit,
+                submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         else:
+            # Only the owner sees/edits "Sent to Accountant", so only touch it on
+            # an owner edit — otherwise a staff edit (no such field) would blank it.
+            acct_set = ", accountant_sent_date=?" if role == "owner" else ""
+            acct_val = [acct_sent] if role == "owner" else []
             q(f"""UPDATE {table} SET
                 seq_no=?, supplier_name=?, invoice_number=?, invoice_date=?,
                 gross_amount=?, vat_amount=?, net_amount=?,
                 due_date=?, payment_terms=?, comments=?, is_paid=?,
-                paid_date=?, payment_method=?, amount_paid=?, credit_note=?
+                paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
+                dd_statement_date=?, cheque_number=?{acct_set},
+                updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([seq_no, supplier, inv_no, inv_date, gross, vat, net,
                 due_date, terms, comments, is_paid, paid_date,
-                pay_method, amt_paid, credit]
+                pay_method, amt_paid, credit, dd_stmt, chq_no]
+               + acct_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         msg = f"Invoice updated — {supplier} {inv_no}"
 
@@ -1071,7 +1408,7 @@ def recent_payments(session: str | None = Cookie(default=None)):
         rows_html += f"""
         <tr style='background:#f8fafc'>
           <td colspan='8' style='font-weight:900;color:#0f2942;padding:10px 12px;font-size:13px'>
-            📅 {date_key}
+            📅 {fmt_uk_date(date_key)}
             <span style='float:right;color:#16a34a;font-weight:700'>Day total: £{day_total:,.2f}</span>
           </td>
         </tr>"""
@@ -1112,3 +1449,297 @@ def recent_payments(session: str | None = Cookie(default=None)):
       </div>
     </div>"""
     return page("Recent Payments", content, user, "invoices")
+
+
+_BAL_SQL = "COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_note,0)"
+
+
+@router.get("/invoices/dd-collection", response_class=HTMLResponse)
+def dd_collection(session: str | None = Cookie(default=None),
+                  dd_date: str = "", msg: str = "", msg_type: str = "success"):
+    """Owner-only DD reconciliation: pick a DD statement date, see all invoices
+    that share it with a grand total, then mark the whole collection paid."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=DD+Collection+Check+is+owner-only&msg_type=error",
+                                status_code=303)
+
+    # DD statement dates that still have unpaid invoices (the picker).
+    dates = q(f"""SELECT dd_statement_date d, COUNT(*) n, SUM({_BAL_SQL}) tot
+                  FROM supplier_invoices
+                  WHERE dd_statement_date IS NOT NULL AND is_paid!='Yes'
+                  GROUP BY dd_statement_date ORDER BY dd_statement_date DESC""",
+              (), fetch=True) or []
+
+    chips = ""
+    for r in dates:
+        sel = "background:#0f2942;color:white" if r["d"] == dd_date else "background:#ecfdf5;color:#047857;border:1px solid #6ee7b7"
+        chips += (f"<a href='/invoices/dd-collection?dd_date={r['d']}' "
+                  f"style='{sel};border-radius:8px;padding:6px 12px;margin:3px;font-size:13px;"
+                  f"font-weight:700;text-decoration:none;display:inline-block'>"
+                  f"{fmt_uk_date(r['d'])} · {r['n']} inv · £{(r['tot'] or 0):,.2f}</a>")
+    if not chips:
+        chips = "<span style='color:#94a3b8;font-size:13px'>No unpaid invoices have a DD statement date.</span>"
+
+    body = ""
+    if dd_date:
+        rows = q(f"""SELECT invoice_id, seq_no, store_name, supplier_name, invoice_number,
+                            gross_amount, {_BAL_SQL} AS balance
+                     FROM supplier_invoices
+                     WHERE dd_statement_date=? AND is_paid!='Yes'
+                     ORDER BY store_name, supplier_name, seq_no""", (dd_date,), fetch=True) or []
+        total = round(sum(r["balance"] or 0 for r in rows), 2)
+        tr = ""
+        for r in rows:
+            tr += (f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+                   f"<td style='font-size:12px'>{r['store_name']}</td>"
+                   f"<td style='font-weight:700'>{r['supplier_name']}</td>"
+                   f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
+                   f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['balance'] or 0):,.2f}</td></tr>")
+        if rows:
+            body = f"""
+            <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
+              <div style='padding:14px 18px;background:#0f2942;color:white;font-weight:700'>
+                DD Statement {fmt_uk_date(dd_date)} — {len(rows)} invoice(s)
+              </div>
+              <div style='overflow-x:auto'>
+                <table class='tbl'>
+                  <thead><tr><th>Serial</th><th>Store</th><th>Supplier</th><th>Invoice No.</th>
+                    <th style='text-align:right'>Balance</th></tr></thead>
+                  <tbody>{tr}</tbody>
+                  <tfoot><tr style='background:#f0fdf4'>
+                    <td colspan='4' style='text-align:right;font-weight:900'>Grand total (should match the bank):</td>
+                    <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
+                  </tr></tfoot>
+                </table>
+              </div>
+              <form method='POST' action='/invoices/dd-collection/mark-paid' style='padding:16px 18px;background:#f8fafc'>
+                <input type='hidden' name='dd_date' value='{dd_date}'>
+                <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-3'>Mark this whole collection paid</div>
+                <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(180px,1fr))'>
+                  <div><label>Bank debit date</label>
+                    <input type='date' name='bank_debit_date' value='{dd_date}'></div>
+                  <div><label>Actual amount collected (£)</label>
+                    <input type='number' step='0.01' name='actual_amount' value='{total:.2f}'></div>
+                  <div style='grid-column:1/-1'><label>Note (e.g. statement out by 1p)</label>
+                    <input type='text' name='note' placeholder='Optional — explains any difference'></div>
+                </div>
+                <div style='margin-top:12px'>
+                  <button type='submit' class='btn-primary'
+                    onclick="return confirm('Mark all {len(rows)} invoice(s) on DD statement {fmt_uk_date(dd_date)} as paid?');">
+                    ✅ Mark all {len(rows)} as paid
+                  </button>
+                </div>
+              </form>
+            </div>"""
+        else:
+            body = ("<div class='card' style='margin-top:14px;color:#64748b'>"
+                    f"No unpaid invoices remain for DD statement {fmt_uk_date(dd_date)} — all settled. ✅</div>")
+
+    flash = ""
+    if msg:
+        colour = "#16a34a" if msg_type == "success" else "#dc2626"
+        bg     = "#f0fdf4" if msg_type == "success" else "#fef2f2"
+        flash = (f"<div style='background:{bg};border:1px solid {colour};color:{colour};"
+                 f"border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:700'>{msg}</div>")
+
+    content = f"""
+    {flash}
+    <div class='flex justify-between items-center'>
+      <div class='text-2xl font-black text-slate-800'>🏦 DD Collection Check</div>
+      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+    </div>
+    <div class='card' style='margin-top:12px'>
+      <div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>
+        Pick a DD statement date to reconcile:
+      </div>
+      {chips}
+    </div>
+    {body}"""
+    return page("DD Collection Check", content, user, "invoices")
+
+
+@router.post("/invoices/dd-collection/mark-paid")
+async def dd_collection_mark_paid(request: Request, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+
+    form      = await request.form()
+    dd_date   = (form.get("dd_date") or "").strip()
+    bank_date = (form.get("bank_debit_date") or "").strip() or dd_date
+    note      = (form.get("note") or "").strip()
+    try:
+        actual = float(form.get("actual_amount") or 0)
+    except (TypeError, ValueError):
+        actual = 0.0
+    if not dd_date:
+        return RedirectResponse("/invoices/dd-collection", status_code=303)
+
+    rows = q(f"""SELECT invoice_id, comments, {_BAL_SQL} AS balance
+                 FROM supplier_invoices WHERE dd_statement_date=? AND is_paid!='Yes'""",
+             (dd_date,), fetch=True) or []
+    total = round(sum(r["balance"] or 0 for r in rows), 2)
+    diff  = round(actual - total, 2) if actual else 0.0
+
+    # Build a single explanatory note (recorded on each invoice) when the bank
+    # figure differs from the invoice total, or when the user typed one.
+    note_suffix = ""
+    if note or diff:
+        parts = [f"DD {fmt_uk_date(dd_date)} reconciled"]
+        if actual:
+            parts.append(f"collected £{actual:,.2f} (diff £{diff:+.2f})")
+        if note:
+            parts.append(note)
+        note_suffix = " | " + "; ".join(parts)
+
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for r in rows:
+        new_comments = (r["comments"] or "")
+        if note_suffix:
+            new_comments = (new_comments + note_suffix).strip(" |")
+        q("""UPDATE supplier_invoices SET is_paid='Yes', paid_date=?,
+                amount_paid=gross_amount,
+                payment_method=COALESCE(NULLIF(payment_method,''),'Direct Debit'),
+                comments=?, updated_by=?, updated_at=?
+             WHERE invoice_id=?""",
+          (bank_date, new_comments, user.get("username", ""), now_ts, r["invoice_id"]))
+
+    from urllib.parse import quote as urlquote
+    msg = (f"Marked {len(rows)} invoice(s) paid for DD statement {fmt_uk_date(dd_date)} "
+           f"(paid {fmt_uk_date(bank_date)}).")
+    if diff:
+        msg += f" Difference of £{diff:+.2f} noted."
+    return RedirectResponse(f"/invoices/dd-collection?msg={urlquote(msg)}&msg_type=success",
+                            status_code=303)
+
+
+@router.get("/invoices/accountant-batch", response_class=HTMLResponse)
+def accountant_batch(session: str | None = Cookie(default=None),
+                     store: str = "", date_from: str = "", date_to: str = "",
+                     msg: str = "", msg_type: str = "success"):
+    """Owner-only: mark a batch of invoices as sent to the accountant in one go.
+    Lists invoices not yet sent, filterable, with a tick box for each."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Send+to+Accountant+is+owner-only&msg_type=error",
+                                status_code=303)
+
+    conds, params = ["accountant_sent_date IS NULL"], []
+    if store in ("Uxbridge", "Newbury"):
+        conds.append("store_name=?"); params.append(store)
+    if date_from:
+        conds.append("invoice_date>=?"); params.append(date_from)
+    if date_to:
+        conds.append("invoice_date<=?"); params.append(date_to)
+    where = "WHERE " + " AND ".join(conds)
+
+    tot  = q(f"SELECT COUNT(*) n, COALESCE(SUM(gross_amount),0) t FROM supplier_invoices {where}",
+             params, fetch=True)[0]
+    rows = q(f"""SELECT invoice_id, seq_no, store_name, supplier_name, invoice_number,
+                        invoice_date, gross_amount
+                 FROM supplier_invoices {where}
+                 ORDER BY invoice_date DESC, seq_no DESC LIMIT 500""", params, fetch=True) or []
+
+    store_opts = "".join(
+        f"<option value='{v}' {'selected' if store==v else ''}>{lbl}</option>"
+        for v, lbl in [("", "Both stores"), ("Uxbridge", "Uxbridge"), ("Newbury", "Newbury")])
+
+    tr = ""
+    for r in rows:
+        tr += (f"<tr><td><input type='checkbox' name='ids' value='{r['invoice_id']}' checked class='rowchk'></td>"
+               f"<td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+               f"<td style='font-size:12px'>{r['store_name']}</td>"
+               f"<td style='font-weight:700'>{r['supplier_name']}</td>"
+               f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
+               f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
+               f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
+
+    capped = ("<div style='color:#b45309;font-size:12px;margin:6px 0'>Showing the first 500 — "
+              "narrow with the filters above to see the rest.</div>") if tot["n"] > 500 else ""
+
+    flash = ""
+    if msg:
+        colour = "#16a34a" if msg_type == "success" else "#dc2626"
+        bg     = "#f0fdf4" if msg_type == "success" else "#fef2f2"
+        flash = (f"<div style='background:{bg};border:1px solid {colour};color:{colour};"
+                 f"border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:700'>{msg}</div>")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if rows:
+        table_and_form = f"""
+        <form method='POST' action='/invoices/accountant-batch/mark'>
+          <div class='card' style='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:12px'>
+            <div><label>Date sent to accountant</label>
+              <input type='date' name='sent_date' value='{today}' required></div>
+            <button type='submit' class='btn-primary'
+              onclick="return confirm('Mark all ticked invoices as sent to the accountant?');">
+              📨 Mark ticked invoices as sent
+            </button>
+            <span style='color:#64748b;font-size:13px'>{tot['n']} not yet sent · total £{tot['t']:,.2f}</span>
+          </div>
+          {capped}
+          <div class='card' style='padding:0;overflow:hidden;margin-top:12px'>
+            <div style='overflow-x:auto'>
+              <table class='tbl'>
+                <thead><tr>
+                  <th><input type='checkbox' id='chkAll' checked title='Select all'></th>
+                  <th>Serial</th><th>Store</th><th>Supplier</th><th>Invoice No.</th>
+                  <th>Inv. Date</th><th style='text-align:right'>Gross</th>
+                </tr></thead>
+                <tbody>{tr}</tbody>
+              </table>
+            </div>
+          </div>
+        </form>
+        <script>
+          document.getElementById('chkAll').addEventListener('change', function() {{
+            document.querySelectorAll('.rowchk').forEach(c => c.checked = this.checked);
+          }});
+        </script>"""
+    else:
+        table_and_form = ("<div class='card' style='margin-top:12px;color:#64748b'>"
+                          "No invoices match — nothing outstanding to send. ✅</div>")
+
+    content = f"""
+    {flash}
+    <div class='flex justify-between items-center'>
+      <div class='text-2xl font-black text-slate-800'>📨 Send to Accountant</div>
+      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+    </div>
+    <form method='GET' action='/invoices/accountant-batch' class='card flex flex-wrap gap-3 items-end' style='margin-top:12px'>
+      <div><label>Store</label><select name='store'>{store_opts}</select></div>
+      <div><label>Invoice date from</label><input type='date' name='date_from' value='{date_from}'></div>
+      <div><label>Invoice date to</label><input type='date' name='date_to' value='{date_to}'></div>
+      <button type='submit' class='btn-secondary'>🔍 Filter</button>
+    </form>
+    {table_and_form}"""
+    return page("Send to Accountant", content, user, "invoices")
+
+
+@router.post("/invoices/accountant-batch/mark")
+async def accountant_batch_mark(request: Request, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+
+    form = await request.form()
+    sent_date = (form.get("sent_date") or "").strip()
+    ids = [int(x) for x in form.getlist("ids") if str(x).isdigit()]
+    from urllib.parse import quote as urlquote
+    if not sent_date or not ids:
+        return RedirectResponse("/invoices/accountant-batch?msg=Pick+a+date+and+at+least+one+invoice&msg_type=error",
+                                status_code=303)
+
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    placeholders = ",".join("?" * len(ids))
+    q(f"""UPDATE supplier_invoices SET accountant_sent_date=?, updated_by=?, updated_at=?
+          WHERE invoice_id IN ({placeholders})""",
+      [sent_date, user.get("username", ""), now_ts] + ids)
+    msg = f"Marked {len(ids)} invoice(s) as sent to the accountant on {fmt_uk_date(sent_date)}."
+    return RedirectResponse(f"/invoices/accountant-batch?msg={urlquote(msg)}&msg_type=success",
+                            status_code=303)
