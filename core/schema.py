@@ -49,6 +49,9 @@ def init_db():
     """)
 
     # ── Supplier Invoices (Retail) ──
+    # NB: no UNIQUE(invoice_number, store_name) — different suppliers legitimately
+    # reuse the same small invoice numbers; duplicate protection is the app's
+    # save-time warning, not a hard DB rule.
     c.execute("""
         CREATE TABLE IF NOT EXISTS supplier_invoices (
             invoice_id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,8 +74,12 @@ def init_db():
             pdf_path          TEXT,
             approval_status   TEXT DEFAULT 'approved',
             submitted_by      TEXT,
-            created_at        TEXT DEFAULT (date('now')),
-            UNIQUE(invoice_number, store_name)
+            created_at        TEXT DEFAULT (datetime('now')),
+            dd_statement_date TEXT,
+            cheque_number     TEXT,
+            accountant_sent_date TEXT,
+            updated_by        TEXT,
+            updated_at        TEXT
         )
     """)
 
@@ -98,7 +105,9 @@ def init_db():
             pdf_path          TEXT,
             approval_status   TEXT DEFAULT 'approved',
             submitted_by      TEXT,
-            created_at        TEXT DEFAULT (date('now'))
+            created_at        TEXT DEFAULT (datetime('now')),
+            updated_by        TEXT,
+            updated_at        TEXT
         )
     """)
 
@@ -230,6 +239,25 @@ def init_db():
             VALUES (?,?,?,?,?,?)
         """, (short, full, price, mort, m_mort, pdate))
 
+    # ── Lightweight migrations: add columns missing from older databases ──
+    def ensure_columns(table, coldefs):
+        existing = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in coldefs:
+            if name not in existing:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    ensure_columns("supplier_invoices", [
+        ("dd_statement_date",    "dd_statement_date TEXT"),
+        ("cheque_number",        "cheque_number TEXT"),
+        ("accountant_sent_date", "accountant_sent_date TEXT"),
+        ("updated_by",           "updated_by TEXT"),
+        ("updated_at",           "updated_at TEXT"),
+    ])
+    ensure_columns("property_invoices", [
+        ("updated_by", "updated_by TEXT"),
+        ("updated_at", "updated_at TEXT"),
+    ])
+
     conn.commit()
     conn.close()
-    print("✅ Database initialised.")
+    print("Database initialised.")
