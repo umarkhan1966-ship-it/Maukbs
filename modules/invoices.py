@@ -1388,29 +1388,42 @@ def reject_invoice(
 
 
 @router.get("/invoices/recent-payments", response_class=HTMLResponse)
-def recent_payments(session: str | None = Cookie(default=None)):
+def recent_payments(session: str | None = Cookie(default=None), scope: str = ""):
     redir, user = require_login(session)
     if redir: return redir
 
     from collections import defaultdict
 
-    rows = q("""
-        SELECT 'retail' as ledger_type, store_name as location,
-               supplier_name, invoice_number, gross_amount,
-               amount_paid, credit_note, paid_date, payment_method, is_paid,
-               COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_note,0) as balance
-        FROM supplier_invoices
-        WHERE paid_date IS NOT NULL OR amount_paid > 0
-        UNION ALL
-        SELECT 'property', property_name,
-               supplier_name, invoice_number, gross_amount,
-               amount_paid, 0, paid_date, payment_method, is_paid,
-               COALESCE(gross_amount,0)-COALESCE(amount_paid,0) as balance
-        FROM property_invoices
-        WHERE paid_date IS NOT NULL OR amount_paid > 0
-        ORDER BY paid_date DESC
-        LIMIT 200
-    """, fetch=True) or []
+    # Scope lets you focus on one ledger — useful because property payments can
+    # be much older than the busy store ones and would otherwise drop off the
+    # most-recent list.
+    want_retail = scope in ("", "Uxbridge", "Newbury")
+    want_prop   = scope in ("", "Property")
+    parts, params = [], []
+    if want_retail:
+        rc = "(paid_date IS NOT NULL OR amount_paid > 0)"
+        if scope in ("Uxbridge", "Newbury"):
+            rc += " AND store_name=?"; params.append(scope)
+        parts.append(f"""
+            SELECT 'retail' as ledger_type, store_name as location,
+                   supplier_name, invoice_number, gross_amount,
+                   amount_paid, credit_note, paid_date, payment_method, is_paid,
+                   COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_note,0) as balance
+            FROM supplier_invoices WHERE {rc}""")
+    if want_prop:
+        parts.append("""
+            SELECT 'property' as ledger_type, property_name as location,
+                   supplier_name, invoice_number, gross_amount,
+                   amount_paid, 0 as credit_note, paid_date, payment_method, is_paid,
+                   COALESCE(gross_amount,0)-COALESCE(amount_paid,0) as balance
+            FROM property_invoices WHERE (paid_date IS NOT NULL OR amount_paid > 0)""")
+    rows = q(" UNION ALL ".join(parts) + " ORDER BY paid_date DESC LIMIT 300",
+             params, fetch=True) or []
+
+    scope_opts = "".join(
+        f"<option value='{v}' {'selected' if scope==v else ''}>{lbl}</option>"
+        for v, lbl in [("", "Everything"), ("Uxbridge", "Uxbridge"),
+                       ("Newbury", "Newbury"), ("Property", "Properties")])
 
     by_date = defaultdict(list)
     for r in rows:
@@ -1448,6 +1461,10 @@ def recent_payments(session: str | None = Cookie(default=None)):
       <div class='text-2xl font-black text-slate-800'>📋 Recent Payments</div>
       <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
     </div>
+    <form method='GET' action='/invoices/recent-payments' class='card flex gap-3 items-end' style='margin-bottom:12px'>
+      <div><label>Show</label><select name='scope' onchange='this.form.submit()'>{scope_opts}</select></div>
+      <button type='submit' class='btn-secondary'>🔍 Filter</button>
+    </form>
     <div class='card' style='padding:0;overflow:hidden'>
       <div style='overflow-x:auto'>
         <table class='tbl'>
@@ -1633,48 +1650,65 @@ async def dd_collection_mark_paid(request: Request, session: str | None = Cookie
 
 @router.get("/invoices/accountant-batch", response_class=HTMLResponse)
 def accountant_batch(session: str | None = Cookie(default=None),
-                     store: str = "", date_from: str = "", date_to: str = "",
+                     scope: str = "", date_from: str = "", date_to: str = "",
                      msg: str = "", msg_type: str = "success"):
     """Owner-only: mark a batch of invoices as sent to the accountant in one go.
-    Lists invoices not yet sent, filterable, with a tick box for each."""
+    Covers both retail stores and properties; lists invoices not yet sent."""
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
         return RedirectResponse("/invoices?msg=Send+to+Accountant+is+owner-only&msg_type=error",
                                 status_code=303)
 
-    conds, params = ["accountant_sent_date IS NULL"], []
-    if store in ("Uxbridge", "Newbury"):
-        conds.append("store_name=?"); params.append(store)
-    if date_from:
-        conds.append("invoice_date>=?"); params.append(date_from)
-    if date_to:
-        conds.append("invoice_date<=?"); params.append(date_to)
-    where = "WHERE " + " AND ".join(conds)
+    # Gather unsent invoices from whichever ledgers the scope covers. Each row
+    # carries its source table so the same invoice_id in both tables can't clash.
+    want_retail = scope in ("", "Uxbridge", "Newbury")
+    want_prop   = scope in ("", "Property")
+    date_conds, date_params = [], []
+    if date_from: date_conds.append("invoice_date>=?"); date_params.append(date_from)
+    if date_to:   date_conds.append("invoice_date<=?"); date_params.append(date_to)
+    date_sql = (" AND " + " AND ".join(date_conds)) if date_conds else ""
 
-    tot  = q(f"SELECT COUNT(*) n, COALESCE(SUM(gross_amount),0) t FROM supplier_invoices {where}",
-             params, fetch=True)[0]
-    rows = q(f"""SELECT invoice_id, seq_no, store_name, supplier_name, invoice_number,
-                        invoice_date, gross_amount
-                 FROM supplier_invoices {where}
-                 ORDER BY invoice_date DESC, seq_no DESC LIMIT 500""", params, fetch=True) or []
+    rows = []
+    if want_retail:
+        rc, rp = ["accountant_sent_date IS NULL"], []
+        if scope in ("Uxbridge", "Newbury"):
+            rc.append("store_name=?"); rp.append(scope)
+        for r in (q(f"""SELECT invoice_id, seq_no, store_name loc, supplier_name,
+                               invoice_number, invoice_date, gross_amount
+                        FROM supplier_invoices WHERE {' AND '.join(rc)}{date_sql}""",
+                    rp + date_params, fetch=True) or []):
+            rows.append(("supplier", r))
+    if want_prop:
+        for r in (q(f"""SELECT invoice_id, seq_no, property_name loc, supplier_name,
+                               invoice_number, invoice_date, gross_amount
+                        FROM property_invoices WHERE accountant_sent_date IS NULL{date_sql}""",
+                    date_params, fetch=True) or []):
+            rows.append(("property", r))
+
+    rows.sort(key=lambda sr: (sr[1]["invoice_date"] or "", sr[1]["seq_no"] or 0), reverse=True)
+    total_n = len(rows)
+    total_t = sum((r["gross_amount"] or 0) for _, r in rows)
+    rows = rows[:500]
 
     store_opts = "".join(
-        f"<option value='{v}' {'selected' if store==v else ''}>{lbl}</option>"
-        for v, lbl in [("", "Both stores"), ("Uxbridge", "Uxbridge"), ("Newbury", "Newbury")])
+        f"<option value='{v}' {'selected' if scope==v else ''}>{lbl}</option>"
+        for v, lbl in [("", "Everything"), ("Uxbridge", "Uxbridge"),
+                       ("Newbury", "Newbury"), ("Property", "Properties")])
 
     tr = ""
-    for r in rows:
-        tr += (f"<tr><td><input type='checkbox' name='ids' value='{r['invoice_id']}' checked class='rowchk'></td>"
+    for src, r in rows:
+        tr += (f"<tr><td><input type='checkbox' name='ids' value='{src}:{r['invoice_id']}' checked class='rowchk'></td>"
                f"<td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
-               f"<td style='font-size:12px'>{r['store_name']}</td>"
+               f"<td style='font-size:12px'>{r['loc']}</td>"
                f"<td style='font-weight:700'>{r['supplier_name']}</td>"
                f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
                f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
                f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
 
     capped = ("<div style='color:#b45309;font-size:12px;margin:6px 0'>Showing the first 500 — "
-              "narrow with the filters above to see the rest.</div>") if tot["n"] > 500 else ""
+              "narrow with the filters above to see the rest.</div>") if total_n > 500 else ""
+    tot = {"n": total_n, "t": total_t}
 
     flash = ""
     if msg:
@@ -1702,7 +1736,7 @@ def accountant_batch(session: str | None = Cookie(default=None),
               <table class='tbl'>
                 <thead><tr>
                   <th><input type='checkbox' id='chkAll' checked title='Select all'></th>
-                  <th>Serial</th><th>Store</th><th>Supplier</th><th>Invoice No.</th>
+                  <th>Serial</th><th>Store/Property</th><th>Supplier</th><th>Invoice No.</th>
                   <th>Inv. Date</th><th style='text-align:right'>Gross</th>
                 </tr></thead>
                 <tbody>{tr}</tbody>
@@ -1726,7 +1760,7 @@ def accountant_batch(session: str | None = Cookie(default=None),
       <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
     </div>
     <form method='GET' action='/invoices/accountant-batch' class='card flex flex-wrap gap-3 items-end' style='margin-top:12px'>
-      <div><label>Store</label><select name='store'>{store_opts}</select></div>
+      <div><label>Ledger</label><select name='scope'>{store_opts}</select></div>
       <div><label>Invoice date from</label><input type='date' name='date_from' value='{date_from}'></div>
       <div><label>Invoice date to</label><input type='date' name='date_to' value='{date_to}'></div>
       <button type='submit' class='btn-secondary'>🔍 Filter</button>
@@ -1744,17 +1778,28 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
 
     form = await request.form()
     sent_date = (form.get("sent_date") or "").strip()
-    ids = [int(x) for x in form.getlist("ids") if str(x).isdigit()]
+    # Checkbox values are "src:id" so the two tables (which have independent
+    # invoice_id sequences) can't be confused.
+    supplier_ids, property_ids = [], []
+    for raw in form.getlist("ids"):
+        src, _, sid = str(raw).partition(":")
+        if not sid.isdigit():
+            continue
+        (supplier_ids if src == "supplier" else property_ids).append(int(sid))
     from urllib.parse import quote as urlquote
-    if not sent_date or not ids:
+    if not sent_date or not (supplier_ids or property_ids):
         return RedirectResponse("/invoices/accountant-batch?msg=Pick+a+date+and+at+least+one+invoice&msg_type=error",
                                 status_code=303)
 
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    placeholders = ",".join("?" * len(ids))
-    q(f"""UPDATE supplier_invoices SET accountant_sent_date=?, updated_by=?, updated_at=?
-          WHERE invoice_id IN ({placeholders})""",
-      [sent_date, user.get("username", ""), now_ts] + ids)
-    msg = f"Marked {len(ids)} invoice(s) as sent to the accountant on {fmt_uk_date(sent_date)}."
+    user_name = user.get("username", "")
+    for tbl, id_list in [("supplier_invoices", supplier_ids), ("property_invoices", property_ids)]:
+        if id_list:
+            ph = ",".join("?" * len(id_list))
+            q(f"""UPDATE {tbl} SET accountant_sent_date=?, updated_by=?, updated_at=?
+                  WHERE invoice_id IN ({ph})""",
+              [sent_date, user_name, now_ts] + id_list)
+    n = len(supplier_ids) + len(property_ids)
+    msg = f"Marked {n} invoice(s) as sent to the accountant on {fmt_uk_date(sent_date)}."
     return RedirectResponse(f"/invoices/accountant-batch?msg={urlquote(msg)}&msg_type=success",
                             status_code=303)
