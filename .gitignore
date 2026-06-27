@@ -8,6 +8,7 @@ env/
 
 # Live database (back this up separately — not tracked here)
 business_vault.db
+business_vault.backup_*.db
 *.db-journal
 *.db-wal
 
