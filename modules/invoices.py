@@ -333,6 +333,10 @@ def ledger_options(user: dict) -> list[tuple]:
                   fetch=True) or []
         for p in props:
             opts.append((f"PROP:{p['short_name']}", f"🏠 {p['full_address']}"))
+        # MREL = Maukbs Real Estate Ltd: a company-level expenses ledger (not a
+        # rental property), so it's added here rather than in the properties
+        # table — keeps it out of rental/mortgage reports.
+        opts.append(("PROP:MREL", "🏢 Maukbs Real Estate Ltd (Company)"))
     elif role == "manager":
         opts += [("Uxbridge", "🏪 Uxbridge (Retail)"),
                  ("Newbury",  "🏪 Newbury (Retail)")]
@@ -389,8 +393,6 @@ def fetch_invoices(ledger: str, search: str, status: str,
 
     # Build a safe ORDER BY from the whitelist. No sort given => newest first.
     col = SORT_COLUMNS.get(sort)
-    if col == "seq_no" and is_prop:   # property table has no seq_no
-        col = None
     direction_sql = "ASC" if str(direction).lower() == "asc" else "DESC"
     if col:
         order_by = f"{col} {direction_sql}, invoice_id DESC"
@@ -544,16 +546,19 @@ def invoices_page(
         paid_opts  = [("No","Unpaid"),("Yes","Paid")]
         meth_opts  = [(m, m or "-- Select --") for m in PAYMENT_METHODS]
         balance    = (inv.get("gross_amount") or 0) - (inv.get("amount_paid") or 0) - (inv.get("credit_note") or 0)
-        # DD Statement Date + Cheque Number are retail-only (the property table
-        # has no such columns). Cheque box shows only when method = Cheque.
-        dd_cheque_fields = ""
-        if not is_prop:
+        # Cheque Number (both retail and property) shows only when method=Cheque.
+        # DD Statement Date is retail-only (property invoices have no DD workflow).
+        cheque_field = (
+            "<div id='chequeWrap' style=\""
+            + ("" if (inv.get('payment_method') or '') == 'Cheque' else "display:none")
+            + "\"><label>Cheque Number</label>"
+            + f"<input type='text' name='cheque_number' value='{inv.get('cheque_number') or ''}'></div>")
+        if is_prop:
+            dd_cheque_fields = cheque_field
+        else:
             dd_cheque_fields = (
                 fi('dd_statement_date', 'DD Statement Date', 'date', inv.get('dd_statement_date',''))
-                + "<div id='chequeWrap' style=\""
-                + ("" if (inv.get('payment_method') or '') == 'Cheque' else "display:none")
-                + "\"><label>Cheque Number</label>"
-                + f"<input type='text' name='cheque_number' value='{inv.get('cheque_number') or ''}'></div>")
+                + cheque_field)
         payment_fields = f"""
         <div class='col-span-2' style='border-top:1px solid #e2e8f0;padding-top:12px;margin-top:4px'>
           <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-3'>Payment Details</div>
@@ -577,26 +582,22 @@ def invoices_page(
             opts=[(e, e or "-- Select --") for e in [""] + EXPENSE_TYPES],
             val=inv.get('expense_type',''))
     
-    # Seq no (retail only) — auto-fill the next serial in line for new invoices
-    if is_prop:
-        seq_field = ""
-    else:
-        seq_default = inv.get('seq_no', '')
-        if not is_edit:
-            # Serial numbers are one shared sequence across BOTH retail stores,
-            # so the next number is the highest in the whole table + 1 (not
-            # per-store, which could clash with a number the other store used).
-            mx  = q("SELECT MAX(seq_no) AS m FROM supplier_invoices", (), fetch=True)
-            seq_default = ((dict(mx[0]).get('m') or 0) + 1) if mx else 1
-        seq_field = fi('seq_no', 'Serial No.', 'number', seq_default)
+    # Serial number — retail and property each keep their OWN shared sequence
+    # (retail: one run across both stores; property: one run across all
+    # properties incl. MREL). Next number = highest in that table + 1.
+    seq_default = inv.get('seq_no', '')
+    if not is_edit:
+        mx  = q(f"SELECT MAX(seq_no) AS m FROM {table}", (), fetch=True)
+        seq_default = ((dict(mx[0]).get('m') or 0) + 1) if mx else 1
+    seq_field = fi('seq_no', 'Serial No.', 'number', seq_default)
 
     # ── Freed serial numbers available to reuse (gaps left by deleted invoices).
     #    Owner only — store staff (and managers) just take the next number,
     #    keeping their screen simple and avoiding confusion. ──
     freed_html = ""
-    if (not is_prop) and (not is_edit) and user.get("role") == "owner":
+    if (not is_edit) and user.get("role") == "owner":
         present = sorted({int(r["seq_no"]) for r in
-                          q("SELECT seq_no FROM supplier_invoices WHERE seq_no IS NOT NULL",
+                          q(f"SELECT seq_no FROM {table} WHERE seq_no IS NOT NULL",
                             (), fetch=True)})
         if present:
             ps = set(present)
@@ -615,9 +616,9 @@ def invoices_page(
                     "<span style='font-weight:400;color:#64748b'>(click to use, or ignore to take the next number)</span>:</span> "
                     f"{chips}{more}</div>")
 
-    # ── Owner-only "Sent to Accountant" date (retail, edit mode) ──
+    # ── Owner-only "Sent to Accountant" date (edit mode, retail or property) ──
     accountant_field = ""
-    if is_edit and (not is_prop) and user.get("role") == "owner":
+    if is_edit and user.get("role") == "owner":
         accountant_field = fi('accountant_sent_date', 'Sent to Accountant',
                               'date', inv.get('accountant_sent_date', ''))
 
@@ -692,7 +693,7 @@ def invoices_page(
           {fi('gross_amount',   'Gross Amount (£)', 'number', inv.get('gross_amount',0))}
           {fi('vat_amount',     'VAT Amount (£)',   'number', inv.get('vat_amount',0))}
           {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0))}
-          {fi('payment_terms',  'Terms (days)',     'number', inv.get('payment_terms',''))}
+          {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''))}
           {prop_or_store_field}
           {accountant_field}
           <!-- PDF attached via the strip above -->
@@ -701,10 +702,11 @@ def invoices_page(
           </div>
           {payment_fields}
         </div>
-        <div class='flex gap-3 mt-4'>
+        <div class='flex gap-3 mt-4 items-center'>
           <button type='submit' class='btn-primary'>{'💾 Update Invoice' if is_edit else '➕ Save Invoice'}</button>
           {'<a href="/invoices/delete/' + str(edit_id) + '?ledger=' + ledger + '" class="btn-danger" onclick=\"return confirm(\'Delete this invoice?\');\">🗑️ Delete</a>' if is_edit else ''}
           <a href='{cancel_url}' class='btn-secondary'>Cancel</a>
+          {"<label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;margin-left:8px'><input type='checkbox' name='save_pending' value='1' " + ('checked' if inv.get('approval_status')=='pending' else '') + "> Mark as pending (review later)</label>" if user.get('role') in ('owner','manager') else ''}
         </div>
       </form>
     </div>"""
@@ -734,7 +736,7 @@ def invoices_page(
             badge = "<span class='badge-unpaid'>UNPAID</span>"
             row_cls = ""
 
-        seq_td = f"<td class='mono' style='color:#94a3b8;font-size:11px'>{row['seq_no'] or ''}</td>" if not is_prop else ""
+        seq_td = f"<td class='mono' style='color:#94a3b8;font-size:11px'>{row['seq_no'] or ''}</td>"
         pdf_td = ""
         if row.get("pdf_path"):
             pdf_url = f"/invoices/pdf/{row['invoice_id']}?ledger={ledger}"
@@ -786,7 +788,7 @@ def invoices_page(
         return (f"<th style='cursor:pointer;white-space:nowrap'>"
                 f"<a href='{qs}' style='color:inherit;text-decoration:none'>{label}{arrow}</a></th>")
 
-    seq_th = sort_th("Serial", "seq") if not is_prop else ""
+    seq_th = sort_th("Serial", "seq")
     headers_html = (
         sort_th("Supplier", "supplier") + sort_th("Invoice No.", "invno")
         + sort_th("Inv. Date", "invdate") + sort_th("Due Date", "due")
@@ -1103,22 +1105,25 @@ async def save_invoice(
 
     from urllib.parse import quote as urlquote
 
-    # ── Serial number must stay unique across the shared sequence (retail) ──
-    if not is_prop and seq_no:
-        clash = q("SELECT invoice_id, store_name FROM supplier_invoices WHERE seq_no=? AND invoice_id<>?",
+    # ── Serial number must stay unique within its own sequence (retail or
+    #    property — checked against the current ledger's table) ──
+    if seq_no:
+        clash = q(f"SELECT invoice_id FROM {table} WHERE seq_no=? AND invoice_id<>?",
                   (seq_no, invoice_id), fetch=True)
         if clash:
-            where_used = clash[0]["store_name"]
             return RedirectResponse(
                 f"/invoices?ledger={ledger}&msg="
-                + urlquote(f"Serial No. {seq_no} is already used (in {where_used}). "
-                           f"Please use a different number.")
+                + urlquote(f"Serial No. {seq_no} is already used. Please use a different number.")
                 + "&msg_type=error", status_code=303)
 
-    # ── Approval status based on role ──
+    # ── Approval status: owner/manager entries are approved by default, but they
+    #    may tick "Mark as pending" to park an entry for later review. ──
     role = user.get("role", "staff")
-    approval_status = "approved" if role in ("owner", "manager") else "pending"
     submitted_by    = user.get("username", "")
+    if role in ("owner", "manager"):
+        approval_status = "pending" if fv("save_pending") else "approved"
+    else:
+        approval_status = "pending"
 
     # ── Duplicate check (supplier + invoice_number + store, warn only) ──
     force = fv("force_save")
@@ -1186,17 +1191,24 @@ async def save_invoice(
         comments = warning_note.strip(" | ")
 
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # On edit, only owner/manager may change the approved/pending state (via the
+    # "Mark as pending" tick); a staff edit leaves the status untouched.
+    appr_set = ", approval_status=?" if role in ("owner", "manager") else ""
+    appr_val = [approval_status] if role in ("owner", "manager") else []
 
     if invoice_id == 0:
         # New invoice
         if is_prop:
-            q(f"""INSERT OR IGNORE INTO {table}
-                (property_name, supplier_name, invoice_number, invoice_date,
+            q(f"""INSERT INTO {table}
+                (seq_no, property_name, supplier_name, invoice_number, invoice_date,
                  expense_type, gross_amount, vat_amount, net_amount, due_date,
-                 payment_terms, comments, is_paid, pdf_path, submitted_by, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-              (loc_val, supplier, inv_no, inv_date, exp_type,
-               gross, vat, net, due_date, terms, comments, is_paid, pdf_path,
+                 paid_date, amount_paid, is_paid, payment_method, cheque_number,
+                 accountant_sent_date, comments, pdf_path, approval_status,
+                 submitted_by, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (seq_no, loc_val, supplier, inv_no, inv_date, exp_type,
+               gross, vat, net, due_date, paid_date, amt_paid, is_paid, pay_method,
+               chq_no, acct_sent, comments, pdf_path, approval_status,
                submitted_by, now_ts))
         else:
             q(f"""INSERT OR IGNORE INTO {table}
@@ -1214,17 +1226,20 @@ async def save_invoice(
     else:
         # Update existing
         if is_prop:
+            acct_set = ", accountant_sent_date=?" if role == "owner" else ""
+            acct_val = [acct_sent] if role == "owner" else []
             q(f"""UPDATE {table} SET
-                supplier_name=?, invoice_number=?, invoice_date=?,
+                seq_no=?, supplier_name=?, invoice_number=?, invoice_date=?,
                 expense_type=?, gross_amount=?, vat_amount=?, net_amount=?,
-                due_date=?, payment_terms=?, comments=?, is_paid=?,
-                paid_date=?, payment_method=?, amount_paid=?,
+                due_date=?, comments=?, is_paid=?,
+                paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
+                cheque_number=?{acct_set}{appr_set},
                 updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
-              ([supplier, inv_no, inv_date, exp_type, gross, vat, net,
-                due_date, terms, comments, is_paid, paid_date, pay_method, credit,
-                submitted_by, now_ts]
+              ([seq_no, supplier, inv_no, inv_date, exp_type, gross, vat, net,
+                due_date, comments, is_paid, paid_date, pay_method, amt_paid, credit,
+                chq_no] + acct_val + appr_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         else:
             # Only the owner sees/edits "Sent to Accountant", so only touch it on
@@ -1236,14 +1251,14 @@ async def save_invoice(
                 gross_amount=?, vat_amount=?, net_amount=?,
                 due_date=?, payment_terms=?, comments=?, is_paid=?,
                 paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
-                dd_statement_date=?, cheque_number=?{acct_set},
+                dd_statement_date=?, cheque_number=?{acct_set}{appr_set},
                 updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([seq_no, supplier, inv_no, inv_date, gross, vat, net,
                 due_date, terms, comments, is_paid, paid_date,
                 pay_method, amt_paid, credit, dd_stmt, chq_no]
-               + acct_val + [submitted_by, now_ts]
+               + acct_val + appr_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         msg = f"Invoice updated — {supplier} {inv_no}"
 

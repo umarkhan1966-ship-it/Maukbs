@@ -87,6 +87,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS property_invoices (
             invoice_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            seq_no         INTEGER,
             property_name  TEXT NOT NULL,
             supplier_name  TEXT NOT NULL,
             invoice_number TEXT,
@@ -101,6 +102,8 @@ def init_db():
             credit_note    REAL DEFAULT 0,
             is_paid        TEXT DEFAULT 'No',
             payment_method TEXT,
+            cheque_number  TEXT,
+            accountant_sent_date TEXT,
             comments       TEXT,
             pdf_path          TEXT,
             approval_status   TEXT DEFAULT 'approved',
@@ -254,8 +257,11 @@ def init_db():
         ("updated_at",           "updated_at TEXT"),
     ])
     ensure_columns("property_invoices", [
-        ("updated_by", "updated_by TEXT"),
-        ("updated_at", "updated_at TEXT"),
+        ("seq_no",               "seq_no INTEGER"),
+        ("cheque_number",        "cheque_number TEXT"),
+        ("accountant_sent_date", "accountant_sent_date TEXT"),
+        ("updated_by",           "updated_by TEXT"),
+        ("updated_at",           "updated_at TEXT"),
     ])
 
     conn.commit()
