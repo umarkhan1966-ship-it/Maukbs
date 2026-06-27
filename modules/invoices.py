@@ -800,11 +800,11 @@ def invoices_page(
     # Pagination
     pag_html = ""
     if total_pages > 1:
-        base = f"/invoices?ledger={ledger}&search={search}&status={status}&sort={sort}&dir={dir}&page="
+        base = f"/invoices?ledger={urlquote(ledger)}&search={urlquote(search)}&status={status}&sort={sort}&dir={dir}&pg="
         pag_html = "<div class='flex gap-2 flex-wrap justify-center'>"
         for p in range(1, total_pages + 1):
             cls = "btn-primary" if p == pg else "btn-secondary"
-            pag_html += f"<a href='{base}{p}' class='{cls}' style='padding:6px 14px'>{p}</a>"
+            pag_html += f"<a href='{base}{p}#list' class='{cls}' style='padding:6px 14px'>{p}</a>"
         pag_html += "</div>"
 
     reset_link = (f"<a href='/invoices?ledger={urlquote(ledger)}#list' "
