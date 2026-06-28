@@ -729,7 +729,7 @@ def invoices_page(
         </div>
         <div class='flex gap-3 mt-4 items-center'>
           <button type='submit' class='btn-primary'>{'💾 Update Invoice' if is_edit else '➕ Save Invoice'}</button>
-          {'<a href="/invoices/delete/' + str(edit_id) + '?ledger=' + ledger + '" class="btn-danger" onclick=\"return confirm(\'Delete this invoice?\');\">🗑️ Delete</a>' if is_edit else ''}
+          {'<a href="/invoices/delete/' + str(edit_id) + '?ledger=' + ledger + '" class="btn-danger" onclick=\"return confirm(\'Delete this invoice?\');\">🗑️ Delete</a>' if (is_edit and user.get('role') == 'owner') else ''}
           <a href='{cancel_url}' class='btn-secondary'>Cancel</a>
           {"<label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;margin-left:8px'><input type='checkbox' name='save_pending' value='1' " + ('checked' if inv.get('approval_status')=='pending' else '') + "> Mark as pending (review later)</label>" if user.get('role') in ('owner','manager') else ''}
         </div>
@@ -1314,8 +1314,8 @@ def delete_invoice(
 ):
     redir, user = require_login(session)
     if redir: return redir
-    if user["role"] not in ("owner", "manager"):
-        return RedirectResponse(f"/invoices?ledger={ledger}&msg=Not+authorised&msg_type=error",
+    if user["role"] != "owner":
+        return RedirectResponse(f"/invoices?ledger={ledger}&msg=Only+the+owner+can+delete+invoices&msg_type=error",
                                 status_code=303)
     table = "property_invoices" if is_property_ledger(ledger) else "supplier_invoices"
     q(f"DELETE FROM {table} WHERE invoice_id=?", (invoice_id,))
