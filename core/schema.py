@@ -78,6 +78,8 @@ def init_db():
             dd_statement_date TEXT,
             cheque_number     TEXT,
             accountant_sent_date TEXT,
+            awaiting_invoice  TEXT,
+            demand_ref        TEXT,
             updated_by        TEXT,
             updated_at        TEXT
         )
@@ -104,6 +106,8 @@ def init_db():
             payment_method TEXT,
             cheque_number  TEXT,
             accountant_sent_date TEXT,
+            awaiting_invoice TEXT,
+            demand_ref     TEXT,
             comments       TEXT,
             pdf_path          TEXT,
             approval_status   TEXT DEFAULT 'approved',
@@ -253,6 +257,8 @@ def init_db():
         ("dd_statement_date",    "dd_statement_date TEXT"),
         ("cheque_number",        "cheque_number TEXT"),
         ("accountant_sent_date", "accountant_sent_date TEXT"),
+        ("awaiting_invoice",     "awaiting_invoice TEXT"),
+        ("demand_ref",           "demand_ref TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
     ])
@@ -260,6 +266,8 @@ def init_db():
         ("seq_no",               "seq_no INTEGER"),
         ("cheque_number",        "cheque_number TEXT"),
         ("accountant_sent_date", "accountant_sent_date TEXT"),
+        ("awaiting_invoice",     "awaiting_invoice TEXT"),
+        ("demand_ref",           "demand_ref TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
     ])

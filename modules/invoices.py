@@ -381,6 +381,8 @@ def fetch_invoices(ledger: str, search: str, status: str,
         conds.append("is_paid != 'Yes' AND amount_paid > 0")
     elif status == "pending":
         conds.append("approval_status = 'pending'")
+    elif status == "awaiting":
+        conds.append("awaiting_invoice = 'Yes'")
     else:
         # Default: exclude pending from main view unless owner/manager reviewing
         pass
@@ -499,7 +501,8 @@ def invoices_page(
     # ── Search & filter bar ──
     status_opts = ""
     for val, label in [("","All"),("overdue","Overdue"),("unpaid","Unpaid"),
-                        ("partial","Partial"),("paid","Paid")]:
+                        ("partial","Partial"),("paid","Paid"),
+                        ("awaiting","⏳ Awaiting VAT invoice")]:
         sel = "selected" if val == status else ""
         status_opts += f"<option value='{val}' {sel}>{label}</option>"
 
@@ -626,6 +629,22 @@ def invoices_page(
         accountant_field = fi('accountant_sent_date', 'Sent to Accountant',
                               'date', inv.get('accountant_sent_date', ''))
 
+    # ── Demand note / pro-forma handling ──
+    # demand_ref records the demand-note / pro-forma number; the "awaiting" flag
+    # marks this as a not-yet-a-VAT-invoice record (VAT held aside until you
+    # finalise it with the real invoice number).
+    demand_field = fi('demand_ref', 'Demand / Pro-forma Ref', val=inv.get('demand_ref', ''))
+    awaiting_on = (inv.get('awaiting_invoice') == 'Yes')
+    awaiting_field = (
+        "<div style='grid-column:1/-1;background:#fffbeb;border:1px solid #fde68a;"
+        "border-radius:8px;padding:8px 12px'>"
+        "<label style='display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#92400e'>"
+        f"<input type='checkbox' name='awaiting_invoice' value='Yes' {'checked' if awaiting_on else ''}>"
+        "⏳ Awaiting VAT invoice "
+        "<span style='font-weight:400;color:#a16207'>— this is a demand note / pro-forma; "
+        "VAT is held aside until you enter the real VAT invoice number and untick this.</span>"
+        "</label></div>")
+
     # Thumbnail preview of the attached PDF (edit mode, when a file is attached)
     pdf_preview = ""
     if is_edit and inv.get("pdf_path"):
@@ -692,6 +711,7 @@ def invoices_page(
           {seq_field}
           {fi('supplier_name',  'Supplier Name',    val=inv.get('supplier_name',''),  req=True)}
           {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''))}
+          {demand_field}
           {fi('invoice_date',   'Invoice Date',     'date', inv.get('invoice_date',''))}
           {fi('due_date',       'Due Date',         'date', inv.get('due_date',''))}
           {fi('gross_amount',   'Gross Amount (£)', 'number', inv.get('gross_amount',0))}
@@ -700,6 +720,7 @@ def invoices_page(
           {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''))}
           {prop_or_store_field}
           {accountant_field}
+          {awaiting_field}
           <!-- PDF attached via the strip above -->
           <div style='grid-column:1/-1'>
             {fi('comments','Comments', val=inv.get('comments',''))}
@@ -739,6 +760,15 @@ def invoices_page(
         else:
             badge = "<span class='badge-unpaid'>UNPAID</span>"
             row_cls = ""
+
+        # Awaiting-VAT-invoice (demand note / pro-forma) is independent of payment
+        # status, so it shows as an extra tag above the payment badge.
+        if row.get("awaiting_invoice") == "Yes":
+            badge = ("<span style='background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;"
+                     "padding:1px 6px;border-radius:6px;display:inline-block;margin-bottom:3px'>"
+                     "⏳ AWAITING VAT INV</span><br>" + badge)
+            if not row_cls:
+                row_cls = "style='background:#fffbeb'"
 
         seq_td = f"<td class='mono' style='color:#94a3b8;font-size:11px'>{row['seq_no'] or ''}</td>"
         pdf_td = ""
@@ -1102,6 +1132,8 @@ async def save_invoice(
     dd_stmt    = fv("dd_statement_date") or None
     chq_no     = fv("cheque_number") or None
     acct_sent  = fv("accountant_sent_date") or None
+    awaiting   = "Yes" if fv("awaiting_invoice") else None
+    demand_ref = fv("demand_ref") or None
 
     if not supplier:
         return RedirectResponse(f"/invoices?ledger={ledger}&msg=Supplier+name+is+required&msg_type=error",
@@ -1208,21 +1240,22 @@ async def save_invoice(
                  expense_type, gross_amount, vat_amount, net_amount, due_date,
                  paid_date, amount_paid, is_paid, payment_method, cheque_number,
                  accountant_sent_date, comments, pdf_path, approval_status,
-                 submitted_by, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 submitted_by, created_at, awaiting_invoice, demand_ref)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (seq_no, loc_val, supplier, inv_no, inv_date, exp_type,
                gross, vat, net, due_date, paid_date, amt_paid, is_paid, pay_method,
                chq_no, acct_sent, comments, pdf_path, approval_status,
-               submitted_by, now_ts))
+               submitted_by, now_ts, awaiting, demand_ref))
         else:
             q(f"""INSERT OR IGNORE INTO {table}
                 (store_name, seq_no, supplier_name, invoice_number, invoice_date,
                  gross_amount, vat_amount, net_amount, due_date, payment_terms,
-                 comments, is_paid, pdf_path, approval_status, submitted_by, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 comments, is_paid, pdf_path, approval_status, submitted_by, created_at,
+                 awaiting_invoice, demand_ref)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (loc_val, seq_no, supplier, inv_no, inv_date,
                gross, vat, net, due_date, terms, comments, is_paid, pdf_path,
-               approval_status, submitted_by, now_ts))
+               approval_status, submitted_by, now_ts, awaiting, demand_ref))
         if approval_status == "pending":
             msg = f"Invoice submitted for approval — {supplier} {inv_no}"
         else:
@@ -1237,13 +1270,13 @@ async def save_invoice(
                 expense_type=?, gross_amount=?, vat_amount=?, net_amount=?,
                 due_date=?, comments=?, is_paid=?,
                 paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
-                cheque_number=?{acct_set}{appr_set},
+                cheque_number=?, awaiting_invoice=?, demand_ref=?{acct_set}{appr_set},
                 updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([seq_no, supplier, inv_no, inv_date, exp_type, gross, vat, net,
                 due_date, comments, is_paid, paid_date, pay_method, amt_paid, credit,
-                chq_no] + acct_val + appr_val + [submitted_by, now_ts]
+                chq_no, awaiting, demand_ref] + acct_val + appr_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         else:
             # Only the owner sees/edits "Sent to Accountant", so only touch it on
@@ -1255,13 +1288,14 @@ async def save_invoice(
                 gross_amount=?, vat_amount=?, net_amount=?,
                 due_date=?, payment_terms=?, comments=?, is_paid=?,
                 paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
-                dd_statement_date=?, cheque_number=?{acct_set}{appr_set},
+                dd_statement_date=?, cheque_number=?,
+                awaiting_invoice=?, demand_ref=?{acct_set}{appr_set},
                 updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([seq_no, supplier, inv_no, inv_date, gross, vat, net,
                 due_date, terms, comments, is_paid, paid_date,
-                pay_method, amt_paid, credit, dd_stmt, chq_no]
+                pay_method, amt_paid, credit, dd_stmt, chq_no, awaiting, demand_ref]
                + acct_val + appr_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         msg = f"Invoice updated — {supplier} {inv_no}"
@@ -1675,7 +1709,9 @@ def accountant_batch(session: str | None = Cookie(default=None),
 
     rows = []
     if want_retail:
-        rc, rp = ["accountant_sent_date IS NULL"], []
+        # Exclude demand notes / pro-formas — they aren't VAT invoices yet.
+        rc, rp = ["accountant_sent_date IS NULL",
+                  "(awaiting_invoice IS NULL OR awaiting_invoice!='Yes')"], []
         if scope in ("Uxbridge", "Newbury"):
             rc.append("store_name=?"); rp.append(scope)
         for r in (q(f"""SELECT invoice_id, seq_no, store_name loc, supplier_name,
@@ -1686,7 +1722,9 @@ def accountant_batch(session: str | None = Cookie(default=None),
     if want_prop:
         for r in (q(f"""SELECT invoice_id, seq_no, property_name loc, supplier_name,
                                invoice_number, invoice_date, gross_amount
-                        FROM property_invoices WHERE accountant_sent_date IS NULL{date_sql}""",
+                        FROM property_invoices
+                        WHERE accountant_sent_date IS NULL
+                          AND (awaiting_invoice IS NULL OR awaiting_invoice!='Yes'){date_sql}""",
                     date_params, fetch=True) or []):
             rows.append(("property", r))
 
