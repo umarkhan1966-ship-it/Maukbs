@@ -1799,7 +1799,10 @@ def accountant_batch(session: str | None = Cookie(default=None),
     {flash}
     <div class='flex justify-between items-center'>
       <div class='text-2xl font-black text-slate-800'>📨 Send to Accountant</div>
-      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+      <div class='flex gap-2'>
+        <a href='/invoices/accountant-sent' class='btn-secondary'>📋 View sent history</a>
+        <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+      </div>
     </div>
     <form method='GET' action='/invoices/accountant-batch' class='card flex flex-wrap gap-3 items-end' style='margin-top:12px'>
       <div><label>Ledger</label><select name='scope'>{store_opts}</select></div>
@@ -1845,3 +1848,102 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
     msg = f"Marked {n} invoice(s) as sent to the accountant on {fmt_uk_date(sent_date)}."
     return RedirectResponse(f"/invoices/accountant-batch?msg={urlquote(msg)}&msg_type=success",
                             status_code=303)
+
+
+@router.get("/invoices/accountant-sent", response_class=HTMLResponse)
+def accountant_sent(session: str | None = Cookie(default=None), sent_date: str = ""):
+    """Owner-only report of what HAS been sent to the accountant, grouped by the
+    date sent. Pick a date to see every invoice in that batch."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+
+    if sent_date:
+        # True batch count/total (not limited by the display cap below).
+        agg = q("""SELECT COUNT(*) n, COALESCE(SUM(gross_amount),0) t FROM (
+                     SELECT gross_amount FROM supplier_invoices WHERE accountant_sent_date=?
+                     UNION ALL
+                     SELECT gross_amount FROM property_invoices WHERE accountant_sent_date=?
+                   )""", (sent_date, sent_date), fetch=True)[0]
+        true_count, total = agg["n"], agg["t"]
+        rows = q("""
+            SELECT 'Retail' src, store_name loc, seq_no, supplier_name, invoice_number,
+                   invoice_date, gross_amount
+            FROM supplier_invoices WHERE accountant_sent_date=?
+            UNION ALL
+            SELECT 'Property', property_name, seq_no, supplier_name, invoice_number,
+                   invoice_date, gross_amount
+            FROM property_invoices WHERE accountant_sent_date=?
+            ORDER BY loc, supplier_name LIMIT 1000
+        """, (sent_date, sent_date), fetch=True) or []
+        capped_note = (f"<div style='color:#b45309;font-size:12px;padding:8px 18px'>"
+                       f"Showing the first 1,000 of {true_count:,} — the batch total above covers all of them."
+                       f"</div>") if true_count > len(rows) else ""
+        tr = "".join(
+            f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+            f"<td style='font-size:12px'>{r['loc']}</td>"
+            f"<td style='font-weight:700'>{r['supplier_name']}</td>"
+            f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
+            f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
+            f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>"
+            for r in rows)
+        body = f"""
+        <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
+          <div style='padding:14px 18px;background:#0f2942;color:white;font-weight:700'>
+            Sent {fmt_uk_date(sent_date)} — {true_count:,} invoice(s)
+          </div>
+          {capped_note}
+          <div style='overflow-x:auto'>
+            <table class='tbl'>
+              <thead><tr><th>Serial</th><th>Store/Property</th><th>Supplier</th>
+                <th>Invoice No.</th><th>Inv. Date</th><th style='text-align:right'>Gross</th></tr></thead>
+              <tbody>{tr}</tbody>
+              <tfoot><tr style='background:#f0fdf4'>
+                <td colspan='5' style='text-align:right;font-weight:900'>Batch total:</td>
+                <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>"""
+        head_extra = (f"<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>")
+    else:
+        batches = q("""
+            SELECT d, SUM(n) n, SUM(t) t FROM (
+              SELECT accountant_sent_date d, COUNT(*) n, COALESCE(SUM(gross_amount),0) t
+              FROM supplier_invoices WHERE accountant_sent_date IS NOT NULL GROUP BY d
+              UNION ALL
+              SELECT accountant_sent_date d, COUNT(*) n, COALESCE(SUM(gross_amount),0) t
+              FROM property_invoices WHERE accountant_sent_date IS NOT NULL GROUP BY d
+            ) GROUP BY d ORDER BY d DESC
+        """, (), fetch=True) or []
+        rowshtml = "".join(
+            f"<tr style='cursor:pointer' onclick=\"window.location='/invoices/accountant-sent?sent_date={b['d']}'\">"
+            f"<td style='font-weight:700'>{fmt_uk_date(b['d'])}</td>"
+            f"<td class='mono' style='text-align:right'>{b['n']}</td>"
+            f"<td class='mono' style='text-align:right'>£{(b['t'] or 0):,.2f}</td></tr>"
+            for b in batches)
+        body = f"""
+        <div class='card' style='margin-top:12px;padding:0;overflow:hidden'>
+          <div style='overflow-x:auto'>
+            <table class='tbl'>
+              <thead><tr><th>Date sent</th><th style='text-align:right'>Invoices</th>
+                <th style='text-align:right'>Total</th></tr></thead>
+              <tbody>{rowshtml or "<tr><td colspan='3' style='text-align:center;padding:24px;color:#94a3b8'>Nothing sent yet</td></tr>"}</tbody>
+            </table>
+          </div>
+        </div>
+        <div style='color:#94a3b8;font-size:12px;margin-top:6px'>Click a date to see the invoices in that batch.</div>"""
+        head_extra = ""
+
+    content = f"""
+    <div class='flex justify-between items-center'>
+      <div class='text-2xl font-black text-slate-800'>📋 Sent to Accountant — history</div>
+      <div class='flex gap-2'>
+        {head_extra}
+        <a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send more</a>
+        <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+      </div>
+    </div>
+    {body}"""
+    return page("Sent to Accountant — history", content, user, "invoices")
