@@ -367,8 +367,8 @@ def fetch_invoices(ledger: str, search: str, status: str,
     params = [loc_val]
 
     if search.strip():
-        conds.append("(supplier_name LIKE ? OR invoice_number LIKE ? OR CAST(seq_no AS TEXT) LIKE ?)")
-        params += [f"%{search}%", f"%{search}%", f"%{search}%"]
+        conds.append("(supplier_name LIKE ? OR invoice_number LIKE ? OR CAST(seq_no AS TEXT) LIKE ? OR demand_ref LIKE ?)")
+        params += [f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%"]
 
     today = datetime.now().strftime("%Y-%m-%d")
     if status == "overdue":
@@ -511,9 +511,9 @@ def invoices_page(
       <form method='GET' action='/invoices' class='flex flex-wrap gap-3 items-end'>
         <input type='hidden' name='ledger' value='{ledger}'>
         <div style='flex:2;min-width:200px'>
-          <label>Search supplier, invoice no. or serial no.</label>
+          <label>Search supplier, invoice no., serial no. or demand ref</label>
           <input type='text' name='search' value='{search}'
-            placeholder='e.g. Bestway, INV-001, 42...'>
+            placeholder='e.g. Bestway, INV-001, 42, KWAP2/30453...'>
         </div>
         <div style='min-width:130px'>
           <label>Status</label>
