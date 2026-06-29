@@ -217,6 +217,20 @@ def init_db():
         )
     """)
 
+    # ── Supplier payment terms (owner-controlled; auto due-date on invoices) ──
+    # term_type: 'days' (term_value = N days) or 'eom' (term_value = N months,
+    # due = last day of the month N months after the invoice month). NULL term_type
+    # = supplier captured but terms not set yet (shows as "needs terms").
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS supplier_terms (
+            supplier_name TEXT PRIMARY KEY,
+            term_type     TEXT,
+            term_value    INTEGER,
+            updated_by    TEXT,
+            updated_at    TEXT
+        )
+    """)
+
     # ── Sessions (server-side login tokens) ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS sessions (

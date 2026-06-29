@@ -532,20 +532,41 @@ def invoices_page(
     form_action = f"/invoices/save/{edit_id}" if is_edit else "/invoices/save/0"
     form_title  = f"✏️ Edit Invoice — {inv.get('supplier_name','')} {inv.get('invoice_number','')}" if is_edit else "➕ New Invoice"
     cancel_url  = f"/invoices?ledger={ledger}"
+    # Staff can't edit the auto-calculated fields (VAT, Net, Due, Terms); owner/manager can.
+    lock_calc   = (user.get("role") == "staff")
+    # Supplier -> term rule map for auto-filling the due date on the form.
+    import json
+    _terms_rows = q("SELECT supplier_name, term_type, term_value FROM supplier_terms WHERE term_type IS NOT NULL",
+                    (), fetch=True) or []
+    supplier_terms_js = json.dumps({r["supplier_name"]: {"t": r["term_type"], "v": r["term_value"]}
+                                    for r in _terms_rows})
 
-    def fi(name, label, ftype="text", val=None, req=False, opts=None, placeholder=""):
-        """Render a form field."""
+    def fi(name, label, ftype="text", val=None, req=False, opts=None, placeholder="",
+           lock=False, hi=False):
+        """Render a form field.
+        req  = HTML-required + red * (must have, e.g. Supplier).
+        hi   = highlight as a key 'please complete' field (blue accent).
+        lock = read-only + greyed (auto-calculated; staff can't edit, owner can).
+        """
         safe_val = val if val is not None else ""
         req_attr = "required" if req else ""
         step     = "step='0.01'" if ftype == "number" else ""
         ph       = f"placeholder='{placeholder}'" if placeholder else ""
+        mark     = " <span style='color:#dc2626'>*</span>" if req else ""
+        styles   = []
+        if lock:
+            styles.append("background:#f1f5f9;color:#64748b;cursor:not-allowed")
+        elif req or hi:
+            styles.append("border-left:4px solid #38bdf8")  # blue accent = key field
+        style_attr = f"style=\"{';'.join(styles)}\"" if styles else ""
+        ro = "readonly" if lock else ""
         if opts is not None:
             o_html = ""
             for ov, ol in opts:
                 sel = "selected" if str(safe_val) == str(ov) else ""
                 o_html += f"<option value='{ov}' {sel}>{ol}</option>"
-            return f"<div><label>{label}</label><select name='{name}' {req_attr}>{o_html}</select></div>"
-        return f"<div><label>{label}</label><input type='{ftype}' name='{name}' value='{safe_val}' {req_attr} {step} {ph}></div>"
+            return f"<div><label>{label}{mark}</label><select name='{name}' {req_attr} {style_attr}>{o_html}</select></div>"
+        return f"<div><label>{label}{mark}</label><input type='{ftype}' name='{name}' value='{safe_val}' {req_attr} {step} {ph} {ro} {style_attr}></div>"
 
     # Payment status fields (only show if editing)
     payment_fields = ""
@@ -710,14 +731,14 @@ def invoices_page(
           {freed_html}
           {seq_field}
           {fi('supplier_name',  'Supplier Name',    val=inv.get('supplier_name',''),  req=True)}
-          {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''))}
+          {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''), hi=True)}
           {demand_field}
-          {fi('invoice_date',   'Invoice Date',     'date', inv.get('invoice_date',''))}
-          {fi('due_date',       'Due Date',         'date', inv.get('due_date',''))}
-          {fi('gross_amount',   'Gross Amount (£)', 'number', inv.get('gross_amount',0))}
-          {fi('vat_amount',     'VAT Amount (£)',   'number', inv.get('vat_amount',0))}
-          {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0))}
-          {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''))}
+          {fi('invoice_date',   'Invoice Date',     'date', inv.get('invoice_date',''), hi=True)}
+          {fi('due_date',       'Due Date',         'date', inv.get('due_date',''), lock=lock_calc)}
+          {fi('gross_amount',   'Gross Amount (£)', 'number', inv.get('gross_amount',0), hi=True)}
+          {fi('vat_amount',     'VAT Amount (£)',   'number', inv.get('vat_amount',0), lock=lock_calc)}
+          {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0), lock=lock_calc)}
+          {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''), lock=lock_calc)}
           {prop_or_store_field}
           {accountant_field}
           {awaiting_field}
@@ -1067,9 +1088,40 @@ def invoices_page(
       <a href='/invoices/recent-payments' class='btn-secondary' style='margin-left:auto'>📋 Recent Payments</a>
       {"<a href='/invoices/dd-collection' class='btn-secondary'>🏦 DD Collection Check</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send to Accountant</a>" if user.get('role') == 'owner' else ''}
+      {"<a href='/invoices/supplier-terms' class='btn-secondary'>📅 Supplier Terms</a>" if user.get('role') == 'owner' else ''}
     </div>"""
 
-    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, list_html, js])
+    # Auto-fill the due date from the supplier's payment-term rule.
+    terms_js = f"""
+    <script>
+    const SUPPLIER_TERMS = {supplier_terms_js};
+    (function() {{
+      function fmt(d) {{ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }}
+      function applyTerms() {{
+        const sup=document.querySelector('[name="supplier_name"]');
+        const idate=document.querySelector('[name="invoice_date"]');
+        const ddate=document.querySelector('[name="due_date"]');
+        const terms=document.querySelector('[name="payment_terms"]');
+        if(!sup||!idate||!ddate) return;
+        const rule=SUPPLIER_TERMS[(sup.value||'').trim()];
+        if(!rule||!idate.value) return;
+        if(ddate.dataset.manual) return;              // owner overrode — leave it
+        let due;
+        if(rule.t==='days'){{ if(terms) terms.value=rule.v; const d=new Date(idate.value); d.setDate(d.getDate()+rule.v); due=d; }}
+        else if(rule.t==='eom'){{ const d=new Date(idate.value); due=new Date(d.getFullYear(), d.getMonth()+rule.v+1, 0); }}
+        if(due) ddate.value=fmt(due);
+      }}
+      document.addEventListener('DOMContentLoaded', function() {{
+        const sup=document.querySelector('[name="supplier_name"]');
+        const idate=document.querySelector('[name="invoice_date"]');
+        if(sup){{ sup.addEventListener('change',applyTerms); sup.addEventListener('blur',applyTerms); }}
+        if(idate) idate.addEventListener('change',applyTerms);
+        applyTerms();
+      }});
+    }})();
+    </script>"""
+
+    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, list_html, js, terms_js])
     return page("Invoices", content, user, "invoices")
 
 
@@ -1947,3 +1999,116 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
     </div>
     {body}"""
     return page("Sent to Accountant — history", content, user, "invoices")
+
+
+@router.get("/invoices/supplier-terms", response_class=HTMLResponse)
+def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", msg_type: str = "success"):
+    """Owner-only screen to set each supplier's payment terms, which auto-fill
+    the due date on invoices. Lists every supplier you've invoiced (most-used
+    first); ones with no rule fall back to manual due-date entry."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Supplier+terms+is+owner-only&msg_type=error", status_code=303)
+
+    rows = q("""
+        SELECT s.supplier_name sn, s.n cnt, t.term_type tt, t.term_value tv
+        FROM (SELECT supplier_name, COUNT(*) n FROM (
+                SELECT supplier_name FROM supplier_invoices
+                UNION ALL SELECT supplier_name FROM property_invoices) GROUP BY supplier_name) s
+        LEFT JOIN supplier_terms t ON t.supplier_name = s.supplier_name
+        ORDER BY s.n DESC, s.supplier_name
+    """, (), fetch=True) or []
+
+    def opts(sel):
+        out = ""
+        for v, lbl in [("", "— Manual (enter due date by hand) —"),
+                       ("days", "Net … days"), ("eom", "End of month + … months")]:
+            out += f"<option value='{v}' {'selected' if (sel or '')==v else ''}>{lbl}</option>"
+        return out
+
+    tr = ""
+    for i, r in enumerate(rows):
+        needs = (r["tt"] is None)
+        tr += (f"<tr class='strow' style=\"{'background:#fffbeb' if needs else ''}\">"
+               f"<input type='hidden' name='sup_{i}' value=\"{r['sn']}\">"
+               f"<td style='font-weight:700'>{r['sn']}</td>"
+               f"<td class='mono' style='text-align:right;color:#94a3b8;font-size:12px'>{r['cnt']}</td>"
+               f"<td><select name='type_{i}' style='padding:4px 6px'>{opts(r['tt'])}</select></td>"
+               f"<td><input type='number' name='val_{i}' value='{r['tv'] if r['tv'] is not None else ''}' "
+               f"min='0' style='width:90px;padding:4px 6px' placeholder='days / months'></td></tr>")
+
+    flash = ""
+    if msg:
+        colour = "#16a34a" if msg_type == "success" else "#dc2626"
+        bg     = "#f0fdf4" if msg_type == "success" else "#fef2f2"
+        flash = (f"<div style='background:{bg};border:1px solid {colour};color:{colour};"
+                 f"border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:700'>{msg}</div>")
+
+    content = f"""
+    {flash}
+    <div class='flex justify-between items-center'>
+      <div class='text-2xl font-black text-slate-800'>📅 Supplier payment terms</div>
+      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+    </div>
+    <div class='card' style='margin-top:12px;font-size:13px;color:#475569'>
+      Set how each supplier's <b>due date</b> is worked out. <b>Net days</b> = invoice date + N days.
+      <b>End of month + months</b> = the last day of the month N months after the invoice
+      (e.g. EOM+1 on a March invoice → 30 April). Amber rows have no rule yet and fall back to
+      manual entry. The due date on an invoice can always be overridden.
+    </div>
+    <div class='card' style='margin-top:12px'>
+      <input type='text' id='filt' placeholder='🔍 Filter suppliers…'
+        style='width:100%;max-width:320px;padding:6px 10px;margin-bottom:10px'
+        onkeyup="var f=this.value.toLowerCase();document.querySelectorAll('.strow').forEach(function(r){{r.style.display=r.innerText.toLowerCase().indexOf(f)>-1?'':'none';}});">
+      <form method='POST' action='/invoices/supplier-terms/save'>
+        <div style='overflow-x:auto;max-height:60vh;overflow-y:auto'>
+          <table class='tbl'>
+            <thead><tr><th>Supplier</th><th style='text-align:right'>Invoices</th>
+              <th>Term type</th><th>Days / Months</th></tr></thead>
+            <tbody>{tr or "<tr><td colspan='4' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
+          </table>
+        </div>
+        <div style='margin-top:12px'><button type='submit' class='btn-primary'>💾 Save terms</button></div>
+      </form>
+    </div>"""
+    return page("Supplier payment terms", content, user, "invoices")
+
+
+@router.post("/invoices/supplier-terms/save")
+async def supplier_terms_save(request: Request, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+
+    form = await request.form()
+    conn = db(); cur = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    uname = user.get("username", "")
+    i, saved = 0, 0
+    while True:
+        sup = form.get(f"sup_{i}")
+        if sup is None:
+            break
+        ttype = (form.get(f"type_{i}") or "").strip()
+        raw = form.get(f"val_{i}")
+        try:
+            tval = int(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            tval = None
+        if ttype in ("days", "eom") and tval is not None:
+            cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, updated_by, updated_at)
+                           VALUES (?,?,?,?,?)
+                           ON CONFLICT(supplier_name) DO UPDATE SET
+                             term_type=excluded.term_type, term_value=excluded.term_value,
+                             updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+                        (sup, ttype, tval, uname, now))
+            saved += 1
+        else:
+            cur.execute("DELETE FROM supplier_terms WHERE supplier_name=?", (sup,))
+        i += 1
+    conn.commit(); conn.close()
+    from urllib.parse import quote as urlquote
+    return RedirectResponse(f"/invoices/supplier-terms?msg={urlquote(f'Saved — {saved} supplier rule(s) set.')}&msg_type=success",
+                            status_code=303)
