@@ -542,11 +542,12 @@ def invoices_page(
                                     for r in _terms_rows})
 
     def fi(name, label, ftype="text", val=None, req=False, opts=None, placeholder="",
-           lock=False, hi=False):
-        """Render a form field.
+           lock=False, hi=False, calc=False):
+        """Render a form field. Colours match the form's key:
         req  = HTML-required + red * (must have, e.g. Supplier).
-        hi   = highlight as a key 'please complete' field (blue accent).
-        lock = read-only + greyed (auto-calculated; staff can't edit, owner can).
+        hi   = amber accent = a key 'please enter by hand' field.
+        calc = green tint = auto-calculated field (VAT/Net/Due/Terms).
+        lock = also read-only (staff can't edit the calc fields; owner can).
         """
         safe_val = val if val is not None else ""
         req_attr = "required" if req else ""
@@ -554,10 +555,12 @@ def invoices_page(
         ph       = f"placeholder='{placeholder}'" if placeholder else ""
         mark     = " <span style='color:#dc2626'>*</span>" if req else ""
         styles   = []
-        if lock:
-            styles.append("background:#f1f5f9;color:#64748b;cursor:not-allowed")
+        if calc:
+            styles.append("background:#f0fdf4;border-left:4px solid #86efac")   # green = auto-calculated
         elif req or hi:
-            styles.append("border-left:4px solid #38bdf8")  # blue accent = key field
+            styles.append("border-left:4px solid #f59e0b")                      # amber = please enter
+        if lock:
+            styles.append("color:#64748b;cursor:not-allowed")
         style_attr = f"style=\"{';'.join(styles)}\"" if styles else ""
         ro = "readonly" if lock else ""
         if opts is not None:
@@ -734,11 +737,11 @@ def invoices_page(
           {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''), hi=True)}
           {demand_field}
           {fi('invoice_date',   'Invoice Date',     'date', inv.get('invoice_date',''), hi=True)}
-          {fi('due_date',       'Due Date',         'date', inv.get('due_date',''), lock=lock_calc)}
+          {fi('due_date',       'Due Date',         'date', inv.get('due_date',''), lock=lock_calc, calc=True)}
           {fi('gross_amount',   'Gross Amount (£)', 'number', inv.get('gross_amount',0), hi=True)}
-          {fi('vat_amount',     'VAT Amount (£)',   'number', inv.get('vat_amount',0), lock=lock_calc)}
-          {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0), lock=lock_calc)}
-          {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''), lock=lock_calc)}
+          {fi('vat_amount',     'VAT Amount (£)',   'number', inv.get('vat_amount',0), lock=lock_calc, calc=True)}
+          {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0), lock=lock_calc, calc=True)}
+          {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''), lock=lock_calc, calc=True)}
           {prop_or_store_field}
           {accountant_field}
           {awaiting_field}
@@ -2064,14 +2067,33 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
       <form method='POST' action='/invoices/supplier-terms/save'>
         <div style='overflow-x:auto;max-height:60vh;overflow-y:auto'>
           <table class='tbl'>
-            <thead><tr><th>Supplier</th><th style='text-align:right'>Invoices</th>
-              <th>Term type</th><th>Days / Months</th></tr></thead>
-            <tbody>{tr or "<tr><td colspan='4' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
+            <thead><tr>
+              <th style='cursor:pointer' onclick='sortSt(0,false)'>Supplier ⇅</th>
+              <th style='cursor:pointer;text-align:right' onclick='sortSt(1,true)'>Invoices ⇅</th>
+              <th style='cursor:pointer' onclick='sortSt(2,false)'>Term type ⇅</th>
+              <th>Days / Months</th></tr></thead>
+            <tbody id='sttbody'>{tr or "<tr><td colspan='4' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
           </table>
         </div>
         <div style='margin-top:12px'><button type='submit' class='btn-primary'>💾 Save terms</button></div>
       </form>
-    </div>"""
+    </div>
+    <script>
+      function sortSt(col, numeric) {{
+        const tb=document.getElementById('sttbody');
+        const rows=Array.from(tb.querySelectorAll('tr.strow'));
+        const asc = tb.dataset.col===String(col) ? tb.dataset.asc!=='1' : true;
+        rows.sort(function(a,b){{
+          let x=a.querySelectorAll('td')[col], y=b.querySelectorAll('td')[col];
+          x = col===2 ? (x.querySelector('select')||{{}}).value||'' : x.innerText.trim();
+          y = col===2 ? (y.querySelector('select')||{{}}).value||'' : y.innerText.trim();
+          if(numeric){{ return asc ? (parseFloat(x)||0)-(parseFloat(y)||0) : (parseFloat(y)||0)-(parseFloat(x)||0); }}
+          return asc ? String(x).localeCompare(y) : String(y).localeCompare(x);
+        }});
+        rows.forEach(function(r){{ tb.appendChild(r); }});
+        tb.dataset.col=col; tb.dataset.asc=asc?'1':'0';
+      }}
+    </script>"""
     return page("Supplier payment terms", content, user, "invoices")
 
 
@@ -2097,6 +2119,9 @@ async def supplier_terms_save(request: Request, session: str | None = Cookie(def
             tval = int(raw) if raw not in (None, "") else None
         except (TypeError, ValueError):
             tval = None
+        # Forgiving: a number entered without choosing a type means "Net N days".
+        if tval is not None and ttype not in ("days", "eom"):
+            ttype = "days"
         if ttype in ("days", "eom") and tval is not None:
             cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, updated_by, updated_at)
                            VALUES (?,?,?,?,?)
