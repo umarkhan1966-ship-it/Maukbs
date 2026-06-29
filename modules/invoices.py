@@ -2033,13 +2033,17 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
     tr = ""
     for i, r in enumerate(rows):
         needs = (r["tt"] is None)
+        esc = str(r['sn']).replace('"', '&quot;')
         tr += (f"<tr class='strow' style=\"{'background:#fffbeb' if needs else ''}\">"
-               f"<input type='hidden' name='sup_{i}' value=\"{r['sn']}\">"
+               f"<input type='hidden' name='sup_{i}' value=\"{esc}\">"
                f"<td style='font-weight:700'>{r['sn']}</td>"
                f"<td class='mono' style='text-align:right;color:#94a3b8;font-size:12px'>{r['cnt']}</td>"
                f"<td><select name='type_{i}' style='padding:4px 6px'>{opts(r['tt'])}</select></td>"
                f"<td><input type='number' name='val_{i}' value='{r['tv'] if r['tv'] is not None else ''}' "
-               f"min='0' style='width:90px;padding:4px 6px' placeholder='days / months'></td></tr>")
+               f"min='0' style='width:90px;padding:4px 6px' placeholder='days / months'></td>"
+               f"<td><button type='button' class='renamebtn' data-sup=\"{esc}\" "
+               f"style='font-size:12px;padding:3px 8px;border:1px solid #cbd5e1;border-radius:6px;"
+               f"background:white;cursor:pointer'>✏️ Rename</button></td></tr>")
 
     flash = ""
     if msg:
@@ -2071,8 +2075,8 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
               <th style='cursor:pointer' onclick='sortSt(0,false)'>Supplier ⇅</th>
               <th style='cursor:pointer;text-align:right' onclick='sortSt(1,true)'>Invoices ⇅</th>
               <th style='cursor:pointer' onclick='sortSt(2,false)'>Term type ⇅</th>
-              <th>Days / Months</th></tr></thead>
-            <tbody id='sttbody'>{tr or "<tr><td colspan='4' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
+              <th>Days / Months</th><th>Tidy up</th></tr></thead>
+            <tbody id='sttbody'>{tr or "<tr><td colspan='5' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
           </table>
         </div>
         <div style='margin-top:12px'><button type='submit' class='btn-primary'>💾 Save terms</button></div>
@@ -2093,6 +2097,21 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
         rows.forEach(function(r){{ tb.appendChild(r); }});
         tb.dataset.col=col; tb.dataset.asc=asc?'1':'0';
       }}
+      document.querySelectorAll('.renamebtn').forEach(function(b){{
+        b.addEventListener('click', function(){{
+          const oldName=b.dataset.sup;
+          const nn=prompt('Rename supplier — this relabels ALL its invoices.\\n'+
+                          'If the new name matches another supplier, they merge.\\n\\nSupplier:', oldName);
+          if(nn===null) return;
+          const v=nn.trim();
+          if(!v || v===oldName) return;
+          const f=document.createElement('form');
+          f.method='POST'; f.action='/invoices/supplier-rename';
+          const i1=document.createElement('input'); i1.name='old_name'; i1.value=oldName;
+          const i2=document.createElement('input'); i2.name='new_name'; i2.value=v;
+          f.appendChild(i1); f.appendChild(i2); document.body.appendChild(f); f.submit();
+        }});
+      }});
     </script>"""
     return page("Supplier payment terms", content, user, "invoices")
 
@@ -2136,4 +2155,39 @@ async def supplier_terms_save(request: Request, session: str | None = Cookie(def
     conn.commit(); conn.close()
     from urllib.parse import quote as urlquote
     return RedirectResponse(f"/invoices/supplier-terms?msg={urlquote(f'Saved — {saved} supplier rule(s) set.')}&msg_type=success",
+                            status_code=303)
+
+
+@router.post("/invoices/supplier-rename")
+async def supplier_rename(request: Request, session: str | None = Cookie(default=None)):
+    """Owner-only: rename a supplier across all its invoices (both ledgers). If
+    the new name already exists, the two merge. No data is lost — it relabels."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+
+    form = await request.form()
+    old = (form.get("old_name") or "").strip()
+    new = (form.get("new_name") or "").strip()
+    from urllib.parse import quote as urlquote
+    if not old or not new or old == new:
+        return RedirectResponse("/invoices/supplier-terms", status_code=303)
+
+    n1 = q("SELECT COUNT(*) c FROM supplier_invoices WHERE supplier_name=?", (old,), fetch=True)[0]["c"]
+    n2 = q("SELECT COUNT(*) c FROM property_invoices WHERE supplier_name=?", (old,), fetch=True)[0]["c"]
+    q("UPDATE supplier_invoices SET supplier_name=? WHERE supplier_name=?", (new, old))
+    q("UPDATE property_invoices SET supplier_name=? WHERE supplier_name=?", (new, old))
+
+    # Move the term rule to the new name only if the new name has none yet;
+    # otherwise keep the new name's existing rule and drop the old one.
+    oldrule = q("SELECT 1 FROM supplier_terms WHERE supplier_name=?", (old,), fetch=True)
+    newrule = q("SELECT 1 FROM supplier_terms WHERE supplier_name=?", (new,), fetch=True)
+    if oldrule and not newrule:
+        q("UPDATE supplier_terms SET supplier_name=? WHERE supplier_name=?", (new, old))
+    else:
+        q("DELETE FROM supplier_terms WHERE supplier_name=?", (old,))
+
+    msg = f"Renamed “{old}” → “{new}” ({n1 + n2} invoice(s) updated)."
+    return RedirectResponse(f"/invoices/supplier-terms?msg={urlquote(msg)}&msg_type=success",
                             status_code=303)
