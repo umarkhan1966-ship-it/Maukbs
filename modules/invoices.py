@@ -540,9 +540,19 @@ def invoices_page(
                     (), fetch=True) or []
     supplier_terms_js = json.dumps({r["supplier_name"]: {"t": r["term_type"], "v": r["term_value"]}
                                     for r in _terms_rows})
+    # Existing supplier names for the Supplier field's autocomplete (cuts down
+    # duplicates/typos by suggesting names already on record).
+    _sup_rows = q("""SELECT DISTINCT supplier_name s FROM (
+                       SELECT supplier_name FROM supplier_invoices
+                       UNION SELECT supplier_name FROM property_invoices)
+                     WHERE supplier_name IS NOT NULL AND supplier_name!='' ORDER BY supplier_name""",
+                  (), fetch=True) or []
+    supplier_datalist = ("<datalist id='supplierlist'>"
+                         + "".join(f"<option value=\"{r['s'].replace(chr(34), '&quot;')}\">" for r in _sup_rows)
+                         + "</datalist>")
 
     def fi(name, label, ftype="text", val=None, req=False, opts=None, placeholder="",
-           lock=False, hi=False, calc=False):
+           lock=False, hi=False, calc=False, dlist=""):
         """Render a form field. Colours match the form's key:
         req  = HTML-required + red * (must have, e.g. Supplier).
         hi   = amber accent = a key 'please enter by hand' field.
@@ -569,7 +579,8 @@ def invoices_page(
                 sel = "selected" if str(safe_val) == str(ov) else ""
                 o_html += f"<option value='{ov}' {sel}>{ol}</option>"
             return f"<div><label>{label}{mark}</label><select name='{name}' {req_attr} {style_attr}>{o_html}</select></div>"
-        return f"<div><label>{label}{mark}</label><input type='{ftype}' name='{name}' value='{safe_val}' {req_attr} {step} {ph} {ro} {style_attr}></div>"
+        list_attr = f"list='{dlist}' autocomplete='off'" if dlist else ""
+        return f"<div><label>{label}{mark}</label><input type='{ftype}' name='{name}' value='{safe_val}' {req_attr} {step} {ph} {ro} {list_attr} {style_attr}></div>"
 
     # Payment status fields (only show if editing)
     payment_fields = ""
@@ -733,7 +744,7 @@ def invoices_page(
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(180px,1fr))'>
           {freed_html}
           {seq_field}
-          {fi('supplier_name',  'Supplier Name',    val=inv.get('supplier_name',''),  req=True)}
+          {fi('supplier_name',  'Supplier Name',    val=inv.get('supplier_name',''),  req=True, dlist='supplierlist')}{supplier_datalist}
           {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''), hi=True)}
           {demand_field}
           {fi('invoice_date',   'Invoice Date',     'date', inv.get('invoice_date',''), hi=True)}
@@ -2067,7 +2078,11 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
     <div class='card' style='margin-top:12px'>
       <input type='text' id='filt' placeholder='🔍 Filter suppliers…'
         style='width:100%;max-width:320px;padding:6px 10px;margin-bottom:10px'
-        onkeyup="var f=this.value.toLowerCase();document.querySelectorAll('.strow').forEach(function(r){{r.style.display=r.innerText.toLowerCase().indexOf(f)>-1?'':'none';}});">
+        onkeyup="document.getElementById('filt').dataset.txt=this.value.toLowerCase();stApply();">
+      <div id='azbar' style='display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px'>
+        <button type='button' onclick="stLetter('')" style='padding:3px 9px;border:1px solid #cbd5e1;border-radius:6px;background:#0f2942;color:white;cursor:pointer;font-weight:700'>All</button>
+        {"".join(f"<button type='button' onclick=\"stLetter('{ch}')\" style='padding:3px 9px;border:1px solid #cbd5e1;border-radius:6px;background:white;cursor:pointer;font-weight:700'>{ch}</button>" for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
+      </div>
       <form method='POST' action='/invoices/supplier-terms/save'>
         <div style='overflow-x:auto;max-height:60vh;overflow-y:auto'>
           <table class='tbl'>
@@ -2083,6 +2098,24 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
       </form>
     </div>
     <script>
+      var stLet='';
+      function stLetter(ch) {{
+        stLet=ch;
+        document.querySelectorAll('#azbar button').forEach(function(b){{
+          const on=(ch===''&&b.innerText==='All')||b.innerText===ch;
+          b.style.background=on?'#0f2942':'white'; b.style.color=on?'white':'';
+        }});
+        stApply();
+      }}
+      function stApply() {{
+        const txt=(document.getElementById('filt').dataset.txt||'');
+        document.querySelectorAll('.strow').forEach(function(r){{
+          const name=(r.querySelectorAll('td')[0].innerText||'').trim();
+          const okL = stLet==='' || name.toUpperCase().charAt(0)===stLet;
+          const okT = txt==='' || r.innerText.toLowerCase().indexOf(txt)>-1;
+          r.style.display=(okL&&okT)?'':'none';
+        }});
+      }}
       function sortSt(col, numeric) {{
         const tb=document.getElementById('sttbody');
         const rows=Array.from(tb.querySelectorAll('tr.strow'));
