@@ -819,6 +819,11 @@ def invoices_page(
             if not row_cls:
                 row_cls = "style='background:#fffbeb'"
 
+        # Credit notes / refunds (negative gross) show red, like the Excel sheet.
+        _g = row['gross_amount'] or 0
+        gross_str = (f"-£{abs(_g):,.2f}" if _g < 0 else f"£{_g:,.2f}")
+        gross_col = "#dc2626" if _g < 0 else "#0f172a"
+
         seq_td = f"<td class='mono' style='color:#94a3b8;font-size:11px'>{row['seq_no'] or ''}</td>"
         pdf_td = ""
         if row.get("pdf_path"):
@@ -849,7 +854,7 @@ def invoices_page(
           <td class='mono' style='font-size:12px'>{row['invoice_number'] or '—'}</td>
           <td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(row['invoice_date'])}</td>
           <td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(row['due_date'])}</td>
-          <td class='mono' style='font-weight:700'>£{row['gross_amount']:,.2f}</td>
+          <td class='mono' style='font-weight:700;color:{gross_col}'>{gross_str}</td>
           <td class='mono' style='color:#16a34a'>{'£'+f'{paid:,.2f}' if paid else '—'}</td>
           <td class='mono' style='font-weight:700;color:{"#dc2626" if balance > 0 else "#16a34a"}'>£{balance:,.2f}</td>
           <td>{badge}</td>
