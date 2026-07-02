@@ -671,20 +671,28 @@ def invoices_page(
                               'date', inv.get('accountant_sent_date', ''))
 
     # ── Demand note / pro-forma handling ──
-    # demand_ref records the demand-note / pro-forma number; the "awaiting" flag
-    # marks this as a not-yet-a-VAT-invoice record (VAT held aside until you
-    # finalise it with the real invoice number).
+    # "Awaiting VAT invoice" is now AUTOMATIC: shown when a demand/pro-forma ref
+    # is entered with no invoice number (so staff can't tick it in error). The
+    # indicator below is read-only and toggled live by JS; owner/manager get an
+    # override tick for the rare case with no demand ref.
     demand_field = fi('demand_ref', 'Demand / Pro-forma Ref', val=inv.get('demand_ref', ''))
-    awaiting_on = (inv.get('awaiting_invoice') == 'Yes')
+    _await_now = bool((inv.get('demand_ref') or '').strip()) and not (inv.get('invoice_number') or '').strip()
+    _await_shown = _await_now or (inv.get('awaiting_invoice') == 'Yes')
+    override_html = ""
+    if user.get("role") in ("owner", "manager"):
+        _forced = (inv.get('awaiting_invoice') == 'Yes') and not _await_now
+        override_html = (
+            "<div style='grid-column:1/-1;font-size:12px;color:#64748b;margin-top:-4px'>"
+            "<label style='display:flex;align-items:center;gap:6px'>"
+            f"<input type='checkbox' name='awaiting_override' value='Yes' {'checked' if _forced else ''}>"
+            "Owner override: force “awaiting VAT invoice” (for a rare case with no demand ref)</label></div>")
     awaiting_field = (
-        "<div style='grid-column:1/-1;background:#fffbeb;border:1px solid #fde68a;"
-        "border-radius:8px;padding:8px 12px'>"
-        "<label style='display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#92400e'>"
-        f"<input type='checkbox' name='awaiting_invoice' value='Yes' {'checked' if awaiting_on else ''}>"
-        "⏳ Awaiting VAT invoice "
-        "<span style='font-weight:400;color:#a16207'>— this is a demand note / pro-forma; "
-        "VAT is held aside until you enter the real VAT invoice number and untick this.</span>"
-        "</label></div>")
+        "<div id='awaitingBox' style='grid-column:1/-1;background:#fffbeb;border:1px solid #fde68a;"
+        "border-radius:8px;padding:8px 12px;" + ("" if _await_shown else "display:none") + "'>"
+        "<span style='font-size:13px;font-weight:700;color:#92400e'>⏳ Awaiting VAT invoice</span> "
+        "<span style='font-size:12px;color:#a16207'>— treated as a demand note / pro-forma (a reference is "
+        "entered with no invoice number). VAT is held aside until the invoice number is entered.</span>"
+        "</div>" + override_html)
 
     # Thumbnail preview of the attached PDF (edit mode, when a file is attached)
     pdf_preview = ""
@@ -936,6 +944,23 @@ def invoices_page(
       }
       if (pmeth) pmeth.addEventListener('change', toggleCheque);
       toggleCheque();
+
+      // Live "Awaiting VAT invoice" indicator: a demand/pro-forma ref with no
+      // invoice number (or the owner override). No manual tick to get wrong.
+      const dref = document.querySelector('[name="demand_ref"]');
+      const invno = document.querySelector('[name="invoice_number"]');
+      const awBox = document.getElementById('awaitingBox');
+      const awOv = document.querySelector('[name="awaiting_override"]');
+      function toggleAwaiting() {
+        if (!awBox) return;
+        const auto = dref && dref.value.trim() && (!invno || !invno.value.trim());
+        const forced = awOv && awOv.checked;
+        awBox.style.display = (auto || forced) ? '' : 'none';
+      }
+      if (dref)  dref.addEventListener('input', toggleAwaiting);
+      if (invno) invno.addEventListener('input', toggleAwaiting);
+      if (awOv)  awOv.addEventListener('change', toggleAwaiting);
+      toggleAwaiting();
 
       // Auto-calc net = gross - vat
       function recalcNet() {
@@ -1204,8 +1229,13 @@ async def save_invoice(
     dd_stmt    = fv("dd_statement_date") or None
     chq_no     = fv("cheque_number") or None
     acct_sent  = fv("accountant_sent_date") or None
-    awaiting   = "Yes" if fv("awaiting_invoice") else None
     demand_ref = fv("demand_ref") or None
+    # "Awaiting VAT invoice" is derived automatically: a demand/pro-forma ref is
+    # present with no invoice number yet. Owner/manager can force it via the
+    # override tick for the rare case that has no demand ref.
+    awaiting   = "Yes" if (demand_ref and not inv_no) else None
+    if user.get("role") in ("owner", "manager") and fv("awaiting_override"):
+        awaiting = "Yes"
 
     # Staff cannot change payment details — on a staff edit, keep whatever is
     # already on the record (their form's payment fields are display-only/locked).
