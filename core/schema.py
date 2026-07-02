@@ -80,6 +80,7 @@ def init_db():
             accountant_sent_date TEXT,
             awaiting_invoice  TEXT,
             demand_ref        TEXT,
+            linked_ref        TEXT,
             updated_by        TEXT,
             updated_at        TEXT
         )
@@ -108,6 +109,7 @@ def init_db():
             accountant_sent_date TEXT,
             awaiting_invoice TEXT,
             demand_ref     TEXT,
+            linked_ref     TEXT,
             comments       TEXT,
             pdf_path          TEXT,
             approval_status   TEXT DEFAULT 'approved',
@@ -273,6 +275,7 @@ def init_db():
         ("accountant_sent_date", "accountant_sent_date TEXT"),
         ("awaiting_invoice",     "awaiting_invoice TEXT"),
         ("demand_ref",           "demand_ref TEXT"),
+        ("linked_ref",           "linked_ref TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
     ])
@@ -282,6 +285,7 @@ def init_db():
         ("accountant_sent_date", "accountant_sent_date TEXT"),
         ("awaiting_invoice",     "awaiting_invoice TEXT"),
         ("demand_ref",           "demand_ref TEXT"),
+        ("linked_ref",           "linked_ref TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
     ])
