@@ -1215,8 +1215,62 @@ def invoices_page(
     }})();
     </script>"""
 
-    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, list_html, js, terms_js])
+    # ── Query / activity notes log (edit mode) — a dated, per-invoice log for
+    #    long-running supplier queries (emails, calls). Anyone logged in can add. ──
+    notes_html = ""
+    if is_edit:
+        _src = "property" if is_prop else "supplier"
+        _notes = q("""SELECT note, author, created_at FROM invoice_notes
+                      WHERE source=? AND invoice_id=? ORDER BY created_at DESC, note_id DESC""",
+                   (_src, edit_id), fetch=True) or []
+        def _esc(s):
+            return (str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        _rows = "".join(
+            f"<div style='border-left:3px solid #cbd5e1;padding:3px 10px;margin-bottom:6px'>"
+            f"<div style='font-size:11px;color:#94a3b8'>{_esc(n['author']) or '—'} · {fmt_uk_dt(n['created_at'])}</div>"
+            f"<div style='font-size:13px;color:#334155;white-space:pre-wrap'>{_esc(n['note'])}</div></div>"
+            for n in _notes)
+        if not _rows:
+            _rows = "<div style='font-size:12px;color:#94a3b8'>No notes yet — add the first one below.</div>"
+        notes_html = f"""
+        <div class='card' id='notes'>
+          <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-2'>📝 Query / activity notes</div>
+          <div style='font-size:11px;color:#94a3b8;margin-bottom:8px'>A dated log for chasing supplier queries.
+            Each note is stamped with who added it and when. Notes are kept — they are not overwritten.</div>
+          <form method='POST' action='/invoices/add-note' style='display:flex;gap:8px;margin-bottom:12px'>
+            <input type='hidden' name='ledger' value='{ledger}'>
+            <input type='hidden' name='invoice_id' value='{edit_id}'>
+            <input type='text' name='note' required maxlength='500'
+              placeholder='Add a note (e.g. Emailed supplier 02/07 about 2 missing items, awaiting reply)'
+              style='flex:1;padding:6px 10px'>
+            <button type='submit' class='btn-secondary'>➕ Add note</button>
+          </form>
+          {_rows}
+        </div>"""
+
+    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, notes_html, list_html, js, terms_js])
     return page("Invoices", content, user, "invoices")
+
+
+@router.post("/invoices/add-note")
+async def add_note(request: Request, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    form = await request.form()
+    ledger = form.get("ledger", "Uxbridge")
+    try:
+        iid = int(form.get("invoice_id") or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    note = (form.get("note") or "").strip()
+    if iid and note:
+        src = "property" if is_property_ledger(ledger) else "supplier"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        q("""INSERT INTO invoice_notes (source, invoice_id, note, author, created_at)
+             VALUES (?,?,?,?,?)""", (src, iid, note[:500], user.get("username", ""), now))
+    from urllib.parse import quote as urlquote
+    return RedirectResponse(f"/invoices?ledger={urlquote(ledger)}&edit_id={iid}#notes",
+                            status_code=303)
 
 
 @router.post("/invoices/save/{invoice_id}")

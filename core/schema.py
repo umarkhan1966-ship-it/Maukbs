@@ -235,6 +235,18 @@ def init_db():
         )
     """)
 
+    # ── Invoice activity / query notes (a dated log per invoice) ──
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_notes (
+            note_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            source     TEXT NOT NULL,        -- 'supplier' or 'property'
+            invoice_id INTEGER NOT NULL,
+            note       TEXT NOT NULL,
+            author     TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     # ── Sessions (server-side login tokens) ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
