@@ -578,7 +578,8 @@ def invoices_page(
             for ov, ol in opts:
                 sel = "selected" if str(safe_val) == str(ov) else ""
                 o_html += f"<option value='{ov}' {sel}>{ol}</option>"
-            return f"<div><label>{label}{mark}</label><select name='{name}' {req_attr} {style_attr}>{o_html}</select></div>"
+            dis = "disabled" if lock else ""
+            return f"<div><label>{label}{mark}</label><select name='{name}' {req_attr} {dis} {style_attr}>{o_html}</select></div>"
         list_attr = f"list='{dlist}' autocomplete='off'" if dlist else ""
         return f"<div><label>{label}{mark}</label><input type='{ftype}' name='{name}' value='{safe_val}' {req_attr} {step} {ph} {ro} {list_attr} {style_attr}></div>"
 
@@ -590,26 +591,31 @@ def invoices_page(
         balance    = (inv.get("gross_amount") or 0) - (inv.get("amount_paid") or 0) - (inv.get("credit_note") or 0)
         # Cheque Number (both retail and property) shows only when method=Cheque.
         # DD Statement Date is retail-only (property invoices have no DD workflow).
+        pay_lock = "readonly style=\"background:#f0fdf4;color:#64748b;cursor:not-allowed\"" if lock_calc else ""
         cheque_field = (
             "<div id='chequeWrap' style=\""
             + ("" if (inv.get('payment_method') or '') == 'Cheque' else "display:none")
             + "\"><label>Cheque Number</label>"
-            + f"<input type='text' name='cheque_number' value='{inv.get('cheque_number') or ''}'></div>")
+            + f"<input type='text' name='cheque_number' value='{inv.get('cheque_number') or ''}' {pay_lock}></div>")
         if is_prop:
             dd_cheque_fields = cheque_field
         else:
             dd_cheque_fields = (
-                fi('dd_statement_date', 'DD Statement Date', 'date', inv.get('dd_statement_date',''))
+                fi('dd_statement_date', 'DD Statement Date', 'date', inv.get('dd_statement_date',''), lock=lock_calc)
                 + cheque_field)
+        staff_note = ("<div style='font-size:11px;color:#94a3b8;margin-bottom:6px'>"
+                      "🔒 Payment details are managed by the owner — shown here for information only.</div>"
+                      if lock_calc else "")
         payment_fields = f"""
         <div class='col-span-2' style='border-top:1px solid #e2e8f0;padding-top:12px;margin-top:4px'>
           <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-3'>Payment Details</div>
+          {staff_note}
           <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'>
-            {fi('is_paid',        'Status',          opts=paid_opts,  val=inv.get('is_paid','No'))}
-            {fi('paid_date',      'Paid Date',        'date',          inv.get('paid_date',''))}
-            {fi('payment_method', 'Payment Method',   opts=meth_opts,  val=inv.get('payment_method',''))}
-            {fi('amount_paid',    'Amount Paid (£)',  'number',        inv.get('amount_paid',0))}
-            {fi('credit_note',    'Credit Note (£)',  'number',        inv.get('credit_note',0))}
+            {fi('is_paid',        'Status',          opts=paid_opts,  val=inv.get('is_paid','No'), lock=lock_calc)}
+            {fi('paid_date',      'Paid Date',        'date',          inv.get('paid_date',''), lock=lock_calc)}
+            {fi('payment_method', 'Payment Method',   opts=meth_opts,  val=inv.get('payment_method',''), lock=lock_calc)}
+            {fi('amount_paid',    'Amount Paid (£)',  'number',        inv.get('amount_paid',0), lock=lock_calc)}
+            {fi('credit_note',    'Credit Note (£)',  'number',        inv.get('credit_note',0), lock=lock_calc)}
             {dd_cheque_fields}
           </div>
           <div class='text-xs text-slate-400 mt-2 mono'>
@@ -1200,6 +1206,24 @@ async def save_invoice(
     acct_sent  = fv("accountant_sent_date") or None
     awaiting   = "Yes" if fv("awaiting_invoice") else None
     demand_ref = fv("demand_ref") or None
+
+    # Staff cannot change payment details — on a staff edit, keep whatever is
+    # already on the record (their form's payment fields are display-only/locked).
+    if invoice_id != 0 and user.get("role") == "staff":
+        _cols = "is_paid, paid_date, payment_method, amount_paid, credit_note, cheque_number"
+        if not is_prop:
+            _cols += ", dd_statement_date"
+        _ex = q(f"SELECT {_cols} FROM {table} WHERE invoice_id=?", (invoice_id,), fetch=True)
+        if _ex:
+            e = dict(_ex[0])
+            is_paid    = e.get("is_paid") or "No"
+            paid_date  = e.get("paid_date")
+            pay_method = e.get("payment_method")
+            amt_paid   = e.get("amount_paid") or 0
+            credit     = e.get("credit_note") or 0
+            chq_no     = e.get("cheque_number")
+            if not is_prop:
+                dd_stmt = e.get("dd_statement_date")
 
     if not supplier:
         return RedirectResponse(f"/invoices?ledger={ledger}&msg=Supplier+name+is+required&msg_type=error",
