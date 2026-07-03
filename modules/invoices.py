@@ -567,7 +567,9 @@ def invoices_page(
         """
         safe_val = val if val is not None else ""
         req_attr = "required" if req else ""
-        step     = "step='0.01'" if ftype == "number" else ""
+        # step='any' avoids over-strict browser validation when a stored value
+        # carries repeating decimals (e.g. VAT = gross / 6 = 1902.56166666…).
+        step     = "step='any'" if ftype == "number" else ""
         ph       = f"placeholder='{placeholder}'" if placeholder else ""
         mark     = " <span style='color:#dc2626'>*</span>" if req else ""
         styles   = []
@@ -1294,7 +1296,9 @@ async def save_invoice(
         return v.strip() if isinstance(v, str) else v
 
     def fnum(key):
-        try: return float(form.get(key, 0) or 0)
+        # Round money to whole pence so we never store repeating decimals
+        # (e.g. VAT = gross / 6), which keeps the amount fields clean.
+        try: return round(float(form.get(key, 0) or 0), 2)
         except: return 0.0
 
     def fint(key):
@@ -1546,7 +1550,16 @@ def delete_invoice(
         return RedirectResponse(f"/invoices?ledger={ledger}&msg=Only+the+owner+can+delete+invoices&msg_type=error",
                                 status_code=303)
     table = "property_invoices" if is_property_ledger(ledger) else "supplier_invoices"
+    # Grab the attached PDF path before deleting the row, so we can also remove
+    # the file — otherwise deleting an invoice leaves an orphaned PDF behind.
+    old = q(f"SELECT pdf_path FROM {table} WHERE invoice_id=?", (invoice_id,), fetch=True)
     q(f"DELETE FROM {table} WHERE invoice_id=?", (invoice_id,))
+    if old and old[0]["pdf_path"]:
+        try:
+            if os.path.exists(old[0]["pdf_path"]):
+                os.remove(old[0]["pdf_path"])
+        except OSError:
+            pass  # file already gone / locked — not worth failing the delete over
     from urllib.parse import quote as urlquote
     return RedirectResponse(
         f"/invoices?ledger={ledger}&msg={urlquote('Invoice deleted')}&msg_type=success",
