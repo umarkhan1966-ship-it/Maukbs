@@ -751,6 +751,19 @@ def invoices_page(
         audit_html = ("<div style='font-size:11px;color:#94a3b8;margin-bottom:10px'>🕒 "
                       + " &nbsp;·&nbsp; ".join(bits) + "</div>")
 
+    # PDF attach behaves differently when editing: on an EXISTING invoice, attaching a
+    # PDF must NOT re-extract/overwrite the fields already entered — it only saves the
+    # document. Auto-fill stays on for NEW invoices (where it's a typing aid).
+    _pdf_hint = ("— attaches the PDF to this invoice; your entered details are left unchanged"
+                 if is_edit else "— uploads once, auto-fills fields AND saves the PDF with the record")
+    _pdf_onchange = "" if is_edit else "extractPdf()"
+    _pdf_note = ("The PDF is saved with this invoice when you press <b>Update</b>. "
+                 "<b>Attaching it does not change your entered details.</b>"
+                 if is_edit else
+                 "Fields auto-fill from the PDF where possible. "
+                 "<span style='background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:1px 5px'>green = auto-filled</span> "
+                 "<span style='background:#fffbeb;border:1px solid #f59e0b;border-radius:4px;padding:1px 5px'>amber = please check / enter by hand</span> "
+                 "Always check before saving.")
     form_html = f"""
     <div class='card' id='invoice-form'>
       {audit_html}
@@ -759,20 +772,17 @@ def invoices_page(
         <div style='font-size:13px;font-weight:700;color:#0369a1;margin-bottom:8px'>
           📎 Attach Invoice PDF
           <span style='font-weight:400;color:#64748b;font-size:12px;margin-left:8px'>
-            — uploads once, auto-fills fields AND saves the PDF with the record
+            {_pdf_hint}
           </span>
         </div>
         <div style='display:flex;gap:10px;align-items:center;flex-wrap:wrap'>
           <input type='file' name='pdf_file' id='pdf_prefill' accept='.pdf'
-            form='invoiceForm' onchange='extractPdf()'
+            form='invoiceForm' onchange="{_pdf_onchange}"
             style='flex:1;min-width:200px;border:1px solid #bae6fd;background:white;padding:5px 10px;border-radius:8px;font-size:13px'>
           <span id='pdf_status' style='font-size:12px;color:#0369a1'></span>
         </div>
         <div style='font-size:11px;color:#94a3b8;margin-top:6px'>
-          Fields auto-fill from the PDF where possible.
-          <span style='background:#f0fdf4;border:1px solid #86efac;border-radius:4px;padding:1px 5px'>green = auto-filled</span>
-          <span style='background:#fffbeb;border:1px solid #f59e0b;border-radius:4px;padding:1px 5px'>amber = please check / enter by hand</span>
-          Always check before saving.
+          {_pdf_note}
         </div>
         {pdf_preview}
       </div>
@@ -1045,6 +1055,13 @@ def invoices_page(
       if (idate) idate.addEventListener('change', recalcDueDate);
       if (terms) terms.addEventListener('input',  recalcDueDate);
       if (ddate) ddate.addEventListener('input',  () => { ddate.dataset.manual='1'; });
+      // Keep invoice numbers uppercase — consistent and easy to scan when checking.
+      const invno = document.querySelector('[name="invoice_number"]');
+      if (invno) invno.addEventListener('input', function() {
+        const p = invno.selectionStart;
+        invno.value = invno.value.toUpperCase();
+        try { invno.setSelectionRange(p, p); } catch(e) {}
+      });
     });
 
     // ── PDF auto-fill ──
@@ -1069,8 +1086,10 @@ def invoices_page(
             el.style.background = '#f0fdf4';  // green tint = auto-filled
           }
         };
-        fill('supplier_name',  data.supplier_name);
-        fill('invoice_number', data.invoice_number);
+        // Supplier is NOT auto-filled from the PDF: it's chosen from the dropdown of
+        // existing suppliers instead, so PDF case/spelling quirks can't create duplicate
+        // suppliers. It stays blank here and is flagged amber ("please enter") below.
+        fill('invoice_number', (data.invoice_number || '').toUpperCase());
         fill('invoice_date',   data.invoice_date);
         fill('due_date',       data.due_date);
         fill('gross_amount',   data.gross_amount);
@@ -1115,7 +1134,7 @@ def invoices_page(
           }
         }
 
-        let found = Object.keys(data).filter(k => !k.startsWith('_') && data[k]).length;
+        let found = Object.keys(data).filter(k => !k.startsWith('_') && k !== 'supplier_name' && data[k]).length;
         if (missing) {
           status.innerHTML = '✅ ' + found + ' fields auto-filled (green). ' +
             '<span style="color:#b45309;font-weight:700">' + missing +
@@ -1318,7 +1337,7 @@ async def save_invoice(
         pdf_path = full_path
 
     supplier   = fv("supplier_name")
-    inv_no     = fv("invoice_number")
+    inv_no     = (fv("invoice_number") or "").upper()
     inv_date   = fv("invoice_date") or None
     due_date   = fv("due_date")     or None
     gross      = fnum("gross_amount")
