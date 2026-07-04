@@ -1079,6 +1079,13 @@ def invoices_page(
         invno.value = invno.value.toUpperCase();
         try { invno.setSelectionRange(p, p); } catch(e) {}
       });
+      // Entering a Paid Date marks the invoice Paid automatically — a shortcut for
+      // simple direct debits reconciled one-by-one against the bank statement.
+      const pdate = document.querySelector('[name="paid_date"]');
+      const pstat = document.querySelector('[name="is_paid"]');
+      if (pdate && pstat) pdate.addEventListener('change', function() {
+        if (pdate.value) pstat.value = 'Yes';
+      });
     });
 
     // ── PDF auto-fill ──
