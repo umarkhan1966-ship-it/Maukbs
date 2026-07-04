@@ -2266,7 +2266,7 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
         return RedirectResponse("/invoices?msg=Supplier+terms+is+owner-only&msg_type=error", status_code=303)
 
     rows = q("""
-        SELECT s.supplier_name sn, s.n cnt, t.term_type tt, t.term_value tv
+        SELECT s.supplier_name sn, s.n cnt, t.term_type tt, t.term_value tv, t.pays_dd dd
         FROM (SELECT supplier_name, COUNT(*) n FROM (
                 SELECT supplier_name FROM supplier_invoices
                 UNION ALL SELECT supplier_name FROM property_invoices) GROUP BY supplier_name) s
@@ -2292,6 +2292,8 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
                f"<td><select name='type_{i}' style='padding:4px 6px'>{opts(r['tt'])}</select></td>"
                f"<td><input type='number' name='val_{i}' value='{r['tv'] if r['tv'] is not None else ''}' "
                f"min='0' style='width:90px;padding:4px 6px' placeholder='days / months'></td>"
+               f"<td style='text-align:center'><input type='checkbox' name='dd_{i}' value='Yes' "
+               f"{'checked' if r['dd']=='Yes' else ''}></td>"
                f"<td><button type='button' class='renamebtn' data-sup=\"{esc}\" "
                f"style='font-size:12px;padding:3px 8px;border:1px solid #cbd5e1;border-radius:6px;"
                f"background:white;cursor:pointer'>✏️ Rename</button></td></tr>")
@@ -2330,7 +2332,7 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
               <th style='cursor:pointer' onclick='sortSt(0,false)'>Supplier ⇅</th>
               <th style='cursor:pointer;text-align:right' onclick='sortSt(1,true)'>Invoices ⇅</th>
               <th style='cursor:pointer' onclick='sortSt(2,false)'>Term type ⇅</th>
-              <th>Days / Months</th><th>Tidy up</th></tr></thead>
+              <th>Days / Months</th><th title='Auto-set Payment Method to Direct Debit on new invoices'>Pays by DD?</th><th>Tidy up</th></tr></thead>
             <tbody id='sttbody'>{tr or "<tr><td colspan='5' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
           </table>
         </div>
@@ -2414,14 +2416,23 @@ async def supplier_terms_save(request: Request, session: str | None = Cookie(def
         # Forgiving: a number entered without choosing a type means "Net N days".
         if tval is not None and ttype not in ("days", "eom"):
             ttype = "days"
+        dd_flag = "Yes" if form.get(f"dd_{i}") else None
         if ttype in ("days", "eom") and tval is not None:
-            cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, updated_by, updated_at)
-                           VALUES (?,?,?,?,?)
+            cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, pays_dd, updated_by, updated_at)
+                           VALUES (?,?,?,?,?,?)
                            ON CONFLICT(supplier_name) DO UPDATE SET
                              term_type=excluded.term_type, term_value=excluded.term_value,
+                             pays_dd=excluded.pays_dd,
                              updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
-                        (sup, ttype, tval, uname, now))
+                        (sup, ttype, tval, dd_flag, uname, now))
             saved += 1
+        elif dd_flag == "Yes":
+            # No term rule, but flagged as paying by DD — keep a row for the DD flag.
+            cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, pays_dd, updated_by, updated_at)
+                           VALUES (?, NULL, NULL, 'Yes', ?, ?)
+                           ON CONFLICT(supplier_name) DO UPDATE SET
+                             pays_dd='Yes', updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+                        (sup, uname, now))
         else:
             cur.execute("DELETE FROM supplier_terms WHERE supplier_name=?", (sup,))
         i += 1
