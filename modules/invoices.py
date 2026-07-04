@@ -372,7 +372,11 @@ def fetch_invoices(ledger: str, search: str, status: str,
 
     today = datetime.now().strftime("%Y-%m-%d")
     if status == "overdue":
-        conds.append(f"is_paid != 'Yes' AND due_date < '{today}' AND COALESCE(approval_status,'approved')='approved'")
+        # Direct Debit invoices auto-collect on/before the due date, so they are NOT
+        # counted as "overdue" — they're awaiting the owner's statement reconciliation.
+        conds.append(f"is_paid != 'Yes' AND due_date < '{today}' AND COALESCE(payment_method,'') != 'Direct Debit' AND COALESCE(approval_status,'approved')='approved'")
+    elif status == "dd_reconcile":
+        conds.append(f"is_paid != 'Yes' AND due_date < '{today}' AND COALESCE(payment_method,'')='Direct Debit'")
     elif status == "unpaid":
         conds.append("is_paid != 'Yes' AND COALESCE(approval_status,'approved')='approved'")
     elif status == "paid":
@@ -465,8 +469,8 @@ def invoices_page(
     tots = q(f"""
         SELECT
           COUNT(*) as total_count,
-          COALESCE(SUM(CASE WHEN is_paid!='Yes' AND due_date < '{today}' THEN gross_amount-amount_paid-credit_note ELSE 0 END),0) as overdue_val,
-          COUNT(CASE WHEN is_paid!='Yes' AND due_date < '{today}' THEN 1 END) as overdue_count,
+          COALESCE(SUM(CASE WHEN is_paid!='Yes' AND due_date < '{today}' AND COALESCE(payment_method,'')!='Direct Debit' THEN gross_amount-amount_paid-credit_note ELSE 0 END),0) as overdue_val,
+          COUNT(CASE WHEN is_paid!='Yes' AND due_date < '{today}' AND COALESCE(payment_method,'')!='Direct Debit' THEN 1 END) as overdue_count,
           COALESCE(SUM(CASE WHEN is_paid='Yes' AND paid_date >= '{year_start}' THEN amount_paid ELSE 0 END),0) as paid_val
         FROM {table} WHERE {loc_col}=?
     """, (loc_val,), fetch=True)
@@ -504,7 +508,7 @@ def invoices_page(
 
     # ── Search & filter bar ──
     status_opts = ""
-    for val, label in [("","All"),("overdue","Overdue"),("unpaid","Unpaid"),
+    for val, label in [("","All"),("overdue","Overdue"),("dd_reconcile","🏦 DD to reconcile"),("unpaid","Unpaid"),
                         ("partial","Partial"),("paid","Paid"),
                         ("awaiting","⏳ Awaiting VAT invoice"),
                         ("credits","💳 Available credit notes"),
@@ -846,8 +850,15 @@ def invoices_page(
             badge = "<span class='badge-paid'>PAID</span>"
             row_cls = ""
         elif row["due_date"] and row["due_date"] < today_s:
-            badge = "<span class='badge-overdue'>OVERDUE</span>"
-            row_cls = "style='background:#fff5f5'"
+            if (row.get("payment_method") or "") == "Direct Debit":
+                # DD collects automatically on/before the due date — show it as awaiting
+                # the owner's statement reconciliation, not as a red "OVERDUE".
+                badge = ("<span style='background:#e0f2fe;color:#075985;font-size:11px;font-weight:700;"
+                         "padding:2px 8px;border-radius:6px'>🏦 DD · to reconcile</span>")
+                row_cls = ""
+            else:
+                badge = "<span class='badge-overdue'>OVERDUE</span>"
+                row_cls = "style='background:#fff5f5'"
         elif paid > 0:
             badge = "<span class='badge-partial'>PARTIAL</span>"
             row_cls = "style='background:#fffbeb'"
