@@ -1423,6 +1423,15 @@ async def save_invoice(
             if not is_prop:
                 dd_stmt = e.get("dd_statement_date")
 
+    # Auto-set Direct Debit on a NEW invoice for suppliers that pay by DD (their
+    # pays_dd flag on the supplier-terms screen). New invoices have no payment
+    # section, so it's applied here; it only fills a blank method, never overrides one.
+    if invoice_id == 0 and not pay_method and supplier:
+        _dd = q("SELECT 1 FROM supplier_terms WHERE supplier_name=? AND pays_dd='Yes'",
+                (supplier,), fetch=True)
+        if _dd:
+            pay_method = "Direct Debit"
+
     if not supplier:
         return RedirectResponse(f"/invoices?ledger={ledger}&msg=Supplier+name+is+required&msg_type=error",
                                 status_code=303)
@@ -1536,11 +1545,11 @@ async def save_invoice(
             q(f"""INSERT OR IGNORE INTO {table}
                 (store_name, seq_no, supplier_name, invoice_number, invoice_date,
                  gross_amount, vat_amount, net_amount, due_date, payment_terms,
-                 comments, is_paid, pdf_path, approval_status, submitted_by, created_at,
+                 comments, is_paid, payment_method, pdf_path, approval_status, submitted_by, created_at,
                  awaiting_invoice, demand_ref, linked_ref, under_query)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (loc_val, seq_no, supplier, inv_no, inv_date,
-               gross, vat, net, due_date, terms, comments, is_paid, pdf_path,
+               gross, vat, net, due_date, terms, comments, is_paid, pay_method, pdf_path,
                approval_status, submitted_by, now_ts, awaiting, demand_ref, linked_ref, under_query))
         if approval_status == "pending":
             msg = f"Invoice submitted for approval — {supplier} {inv_no}"
