@@ -1056,7 +1056,7 @@ def invoices_page(
       if (terms) terms.addEventListener('input',  recalcDueDate);
       if (ddate) ddate.addEventListener('input',  () => { ddate.dataset.manual='1'; });
       // Keep invoice numbers uppercase — consistent and easy to scan when checking.
-      const invno = document.querySelector('[name="invoice_number"]');
+      // (reuse the `invno` declared above for the awaiting-VAT indicator)
       if (invno) invno.addEventListener('input', function() {
         const p = invno.selectionStart;
         invno.value = invno.value.toUpperCase();
