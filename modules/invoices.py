@@ -757,6 +757,11 @@ def invoices_page(
     _pdf_hint = ("— attaches the PDF to this invoice; your entered details are left unchanged"
                  if is_edit else "— uploads once, auto-fills fields AND saves the PDF with the record")
     _pdf_onchange = "" if is_edit else "extractPdf()"
+    _pdf_remove_btn = ("" if is_edit else
+        "<button type='button' id='pdf_remove' onclick='removePdf()' "
+        "style='display:none;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;"
+        "border-radius:6px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer'>"
+        "✕ Remove / change PDF</button>")
     _pdf_note = ("The PDF is saved with this invoice when you press <b>Update</b>. "
                  "<b>Attaching it does not change your entered details.</b>"
                  if is_edit else
@@ -780,6 +785,7 @@ def invoices_page(
             form='invoiceForm' onchange="{_pdf_onchange}"
             style='flex:1;min-width:200px;border:1px solid #bae6fd;background:white;padding:5px 10px;border-radius:8px;font-size:13px'>
           <span id='pdf_status' style='font-size:12px;color:#0369a1'></span>
+          {_pdf_remove_btn}
         </div>
         <div style='font-size:11px;color:#94a3b8;margin-top:6px'>
           {_pdf_note}
@@ -1069,6 +1075,15 @@ def invoices_page(
       const fileInput = document.getElementById('pdf_prefill');
       const status    = document.getElementById('pdf_status');
       if (!fileInput.files.length) return;
+      // Show the PDF instantly (client-side) so you can read it while filling the form,
+      // and reveal the "remove/change" button in case the wrong file was picked.
+      try {
+        if (window._pdfObjUrl) URL.revokeObjectURL(window._pdfObjUrl);
+        window._pdfObjUrl = URL.createObjectURL(fileInput.files[0]);
+        showPdf(window._pdfObjUrl);
+        const rm = document.getElementById('pdf_remove');
+        if (rm) rm.style.display = '';
+      } catch(e) {}
       // File is already attached to the form — just extract the data
       status.textContent = '⏳ Reading PDF...';
       const formData = new FormData();
@@ -1175,6 +1190,20 @@ def invoices_page(
       document.getElementById('pdfPanel').style.display = 'none';
       document.querySelector('.ml-52').style.marginRight = '0';
       document.getElementById('pdfFrame').src = '';
+    }
+    // Drop a wrongly-picked PDF before saving: clear the file, the preview, and any
+    // fields the PDF auto-filled, so you can start clean or pick another.
+    function removePdf() {
+      const fi = document.getElementById('pdf_prefill');
+      if (fi) fi.value = '';
+      if (window._pdfObjUrl) { URL.revokeObjectURL(window._pdfObjUrl); window._pdfObjUrl = null; }
+      closePdf();
+      const rm = document.getElementById('pdf_remove'); if (rm) rm.style.display = 'none';
+      const st = document.getElementById('pdf_status'); if (st) st.textContent = '';
+      ['invoice_number','invoice_date','due_date','gross_amount','vat_amount','net_amount','payment_terms'].forEach(function(n){
+        const el = document.querySelector('[name="'+n+'"]');
+        if (el) { el.value=''; el.style.background=''; el.style.border=''; el.dataset.manual=''; el.dataset.needsInput=''; }
+      });
     }
     </script>"""
 
