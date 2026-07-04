@@ -1487,7 +1487,9 @@ async def save_invoice(
 </div>
 </body></html>""")
 
-    # ── Validation warnings (non-blocking, stored as comment note) ──
+    # ── Validation warnings (non-blocking) — shown ONCE on-screen after saving,
+    #    NOT written into the comments (that used to pile up on every edit).
+    #    "Due date is in the past" dropped: the Overdue flag already covers it.
     warnings = []
     if gross > 0 and vat > 0:
         expected_vat = round(gross / 6, 2)
@@ -1495,13 +1497,6 @@ async def save_invoice(
             warnings.append(f"VAT £{vat:.2f} doesn't match standard 20% (expected ~£{expected_vat:.2f})")
     if gross > 10000:
         warnings.append(f"Large invoice amount: £{gross:,.2f} — please double-check")
-    if due_date and due_date < datetime.now().strftime("%Y-%m-%d"):
-        warnings.append("Due date is in the past")
-    warning_note = (" | WARNINGS: " + "; ".join(warnings)) if warnings else ""
-    if warning_note and comments:
-        comments = comments + warning_note
-    elif warning_note:
-        comments = warning_note.strip(" | ")
 
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # On edit, only owner/manager may change the approved/pending state (via the
@@ -1581,6 +1576,8 @@ async def save_invoice(
         msg = f"Invoice updated — {supplier} {inv_no}"
 
     from urllib.parse import quote as urlquote
+    if warnings:
+        msg = msg + "  ⚠️ Please check: " + "; ".join(warnings)
     return RedirectResponse(
         f"/invoices?ledger={ledger}&msg={urlquote(msg)}&msg_type=success#invoice-form",
         status_code=303)
