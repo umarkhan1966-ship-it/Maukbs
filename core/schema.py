@@ -230,6 +230,7 @@ def init_db():
             supplier_name TEXT PRIMARY KEY,
             term_type     TEXT,
             term_value    INTEGER,
+            pays_dd       TEXT,
             updated_by    TEXT,
             updated_at    TEXT
         )
@@ -304,6 +305,9 @@ def init_db():
         ("under_query",          "under_query TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
+    ])
+    ensure_columns("supplier_terms", [
+        ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit
     ])
 
     conn.commit()

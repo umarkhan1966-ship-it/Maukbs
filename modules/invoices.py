@@ -309,7 +309,7 @@ def extract_pdf_data(pdf_bytes: bytes) -> dict:
 UPLOAD_DIR = "invoice_pdfs"
 
 
-PAYMENT_METHODS = ["", "Direct Debit", "Card", "Cash", "Cheque", "Online", "Amex"]
+PAYMENT_METHODS = ["", "Direct Debit", "Card", "Cash", "Cheque", "Online", "Amex", "Credit Note"]
 
 
 EXPENSE_TYPES   = [
