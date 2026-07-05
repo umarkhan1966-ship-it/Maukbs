@@ -758,9 +758,9 @@ def invoices_page(
     # PDF attach behaves differently when editing: on an EXISTING invoice, attaching a
     # PDF must NOT re-extract/overwrite the fields already entered — it only saves the
     # document. Auto-fill stays on for NEW invoices (where it's a typing aid).
-    _pdf_hint = ("— attaches the PDF to this invoice; your entered details are left unchanged"
+    _pdf_hint = ("— attaches the PDF and shows it side-by-side; your entered details are left unchanged"
                  if is_edit else "— uploads once, auto-fills fields AND saves the PDF with the record")
-    _pdf_onchange = "" if is_edit else "extractPdf()"
+    _pdf_onchange = "previewPdfOnly()" if is_edit else "extractPdf()"
     _pdf_remove_btn = ("" if is_edit else
         "<button type='button' id='pdf_remove' onclick='removePdf()' "
         "style='display:none;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;"
@@ -1222,6 +1222,19 @@ def invoices_page(
         const el = document.querySelector('[name="'+n+'"]');
         if (el) { el.value=''; el.style.background=''; el.style.border=''; el.dataset.manual=''; el.dataset.needsInput=''; }
       });
+    }
+    // Edit mode: show the attached PDF side-by-side WITHOUT extracting/overwriting any
+    // field — so you can read it while checking the record, and your entries stay untouched.
+    function previewPdfOnly() {
+      const fi = document.getElementById('pdf_prefill');
+      if (!fi || !fi.files.length) return;
+      try {
+        if (window._pdfObjUrl) URL.revokeObjectURL(window._pdfObjUrl);
+        window._pdfObjUrl = URL.createObjectURL(fi.files[0]);
+        showPdf(window._pdfObjUrl);
+      } catch(e) {}
+      const st = document.getElementById('pdf_status');
+      if (st) { st.textContent = '📎 PDF ready — saved when you press Update. Your entered details are unchanged.'; st.style.color = '#16a34a'; }
     }
     </script>"""
 
