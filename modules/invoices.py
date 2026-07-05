@@ -577,12 +577,14 @@ def invoices_page(
         ph       = f"placeholder='{placeholder}'" if placeholder else ""
         mark     = " <span style='color:#dc2626'>*</span>" if req else ""
         styles   = []
-        if calc:
+        if lock:
+            # Read-only for staff: show plainly greyed/disabled (NOT the green auto-calc
+            # tint) so staff clearly see "you can see this, but you can't edit it".
+            styles.append("background:#f1f5f9;color:#94a3b8;cursor:not-allowed;border-left:4px solid #cbd5e1")
+        elif calc:
             styles.append("background:#f0fdf4;border-left:4px solid #86efac")   # green = auto-calculated
         elif req or hi:
             styles.append("border-left:4px solid #f59e0b")                      # amber = please enter
-        if lock:
-            styles.append("color:#64748b;cursor:not-allowed")
         style_attr = f"style=\"{';'.join(styles)}\"" if styles else ""
         ro = "readonly" if lock else ""
         if opts is not None:
@@ -1116,7 +1118,7 @@ def invoices_page(
           const el = document.querySelector('[name="' + name + '"]');
           if (el && val !== undefined && val !== null && val !== '') {
             el.value = val;
-            el.style.background = '#f0fdf4';  // green tint = auto-filled
+            if (!el.readOnly) el.style.background = '#f0fdf4';  // green tint (skip locked/staff fields)
           }
         };
         // Supplier is NOT auto-filled from the PDF: it's chosen from the dropdown of
@@ -1151,7 +1153,7 @@ def invoices_page(
         let missing = 0;
         for (const name of Object.keys(KEY_FIELDS)) {
           const el = document.querySelector('[name="' + name + '"]');
-          if (!el) continue;
+          if (!el || el.readOnly) continue;   // don't flag locked (staff) fields amber
           const v = (el.value || '').trim();
           const blank = v === '' || v === '0' || v === '0.00' || parseFloat(v) === 0;
           if (blank) {
