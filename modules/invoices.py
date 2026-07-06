@@ -2339,10 +2339,11 @@ def reports(session: str | None = Cookie(default=None),
         conds.append("due_date IS NOT NULL AND due_date<>'' AND due_date<=?"); params.append(cutoff)
         date_col = "due_date"
     elif report == "comment":
+        # Match on the comment (and store) only — NOT dates. These "filed at the
+        # start of…" invoices are deliberately dated OUTSIDE the filed month, so a
+        # date filter would wrongly hide them.
         if comment.strip():
             conds.append("comments LIKE ?"); params.append(f"%{comment.strip()}%")
-        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
-        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
 
     # Sort: default sensibly per report, user-overridable; group by store first when "Both".
     if not sort:
@@ -2494,7 +2495,7 @@ def reports(session: str | None = Cookie(default=None),
     function repFields() {
       var r = document.getElementById('rep').value;
       var m = {supplier:['supplier','dates'], overdue:['due'], upcoming:['supplier','due'],
-               period:['dates'], paid:['dates'], unpaid:[], comment:['comment','dates']};
+               period:['dates'], paid:['dates'], unpaid:[], comment:['comment']};
       var use = m[r] || [];
       document.querySelectorAll('[data-f]').forEach(function(el){
         var on = use.indexOf(el.getAttribute('data-f')) > -1;
