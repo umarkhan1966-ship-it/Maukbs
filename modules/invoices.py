@@ -1265,6 +1265,7 @@ def invoices_page(
       <a href='/invoices/recent-payments' class='btn-secondary' style='margin-left:auto'>📋 Recent Payments</a>
       {"<a href='/invoices/dd-collection' class='btn-secondary'>🏦 DD Collection Check</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send to Accountant</a>" if user.get('role') == 'owner' else ''}
+      {"<a href='/invoices/reports' class='btn-secondary'>📊 Reports</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/supplier-terms' class='btn-secondary'>📅 Supplier Terms</a>" if user.get('role') == 'owner' else ''}
     </div>"""
 
@@ -2275,6 +2276,178 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
     </div>
     {body}"""
     return page("Sent to Accountant — history", content, user, "invoices")
+
+
+@router.get("/invoices/reports", response_class=HTMLResponse)
+def reports(session: str | None = Cookie(default=None),
+            report: str = "supplier", store: str = "Both", supplier: str = "",
+            date_from: str = "", date_to: str = "", due_days: str = "14",
+            exclude_dd: str = "", run: str = "", export: str = ""):
+    """Owner-only flexible reporting. The chosen report decides which filters
+    apply (e.g. Overdue ignores the supplier box), and results carry totals."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Reports+is+owner-only&msg_type=error", status_code=303)
+
+    REPORTS = [("supplier", "Supplier statement"), ("overdue", "Overdue / due window"),
+               ("period", "Period / quarterly"), ("paid", "Paid in a period"),
+               ("unpaid", "Unpaid (all outstanding)")]
+    labels = dict(REPORTS)
+    if report not in labels:
+        report = "supplier"
+
+    # ── Build the query for the chosen report — each uses only its own filters ──
+    conds, params = [], []
+    if store in ("Uxbridge", "Newbury"):
+        conds.append("store_name=?"); params.append(store)
+    if exclude_dd == "1":
+        conds.append("COALESCE(payment_method,'')!='Direct Debit'")
+    date_col = "invoice_date"
+
+    if report == "supplier":
+        if supplier.strip():
+            conds.append("supplier_name=?"); params.append(supplier.strip())
+        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
+        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
+    elif report == "overdue":
+        try: n = int(due_days)
+        except (TypeError, ValueError): n = 0
+        cutoff = (datetime.now() + timedelta(days=n)).strftime("%Y-%m-%d")
+        conds.append("is_paid!='Yes'")
+        conds.append("due_date IS NOT NULL AND due_date<>'' AND due_date<=?"); params.append(cutoff)
+        date_col = "due_date"
+    elif report == "period":
+        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
+        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
+    elif report == "paid":
+        conds.append("is_paid='Yes'")
+        if date_from: conds.append("paid_date>=?"); params.append(date_from)
+        if date_to:   conds.append("paid_date<=?"); params.append(date_to)
+        date_col = "paid_date"
+    elif report == "unpaid":
+        conds.append("is_paid!='Yes'")
+        date_col = "due_date"
+
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    do_run = (run == "1" or export == "csv")
+    rows = (q(f"""SELECT seq_no, supplier_name, store_name, invoice_number, invoice_date,
+                         due_date, paid_date, gross_amount, vat_amount, net_amount, is_paid
+                  FROM supplier_invoices {where}
+                  ORDER BY {date_col}, supplier_name""", tuple(params), fetch=True) or []) if do_run else []
+    tot_g = round(sum(r["gross_amount"] or 0 for r in rows), 2)
+    tot_v = round(sum(r["vat_amount"]   or 0 for r in rows), 2)
+    tot_n = round(sum(r["net_amount"]   or 0 for r in rows), 2)
+
+    # ── CSV (Excel) export ──
+    if export == "csv":
+        import csv
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["Serial", "Supplier", "Store", "Invoice No", "Invoice Date",
+                    "Due Date", "Paid Date", "Amount", "VAT", "Net", "Status"])
+        for r in rows:
+            w.writerow([r["seq_no"], r["supplier_name"], r["store_name"], r["invoice_number"],
+                        r["invoice_date"], r["due_date"], r["paid_date"],
+                        r["gross_amount"], r["vat_amount"], r["net_amount"], r["is_paid"]])
+        w.writerow([]); w.writerow(["Totals", f"{len(rows)} invoices", "", "", "", "", "",
+                                    tot_g, tot_v, tot_n, ""])
+        fn = f"report_{report}_{datetime.now().strftime('%Y%m%d')}.csv"
+        return Response(buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename={fn}"})
+
+    _sup = q("SELECT DISTINCT supplier_name s FROM supplier_invoices WHERE supplier_name IS NOT NULL AND supplier_name<>'' ORDER BY supplier_name", (), fetch=True) or []
+    supplier_datalist = ("<datalist id='supplierlist'>"
+                         + "".join(f"<option value=\"{(r['s'] or '').replace(chr(34), '&quot;')}\">" for r in _sup)
+                         + "</datalist>")
+    rep_opts = "".join(f"<option value='{v}' {'selected' if v == report else ''}>{l}</option>" for v, l in REPORTS)
+    store_opt = lambda s: "selected" if store == s else ""
+
+    shown = rows[:2000]
+    body = ""
+    for r in shown:
+        g = r["gross_amount"] or 0
+        gcol = "#dc2626" if g < 0 else "#0f172a"
+        body += (f"<tr><td class='mono' style='font-size:12px;color:#94a3b8'>{r['seq_no'] or ''}</td>"
+                 f"<td style='font-weight:700'>{r['supplier_name'] or ''}</td>"
+                 f"<td style='font-size:12px'>{r['store_name'] or ''}</td>"
+                 f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or ''}</td>"
+                 f"<td class='mono' style='font-size:12px'>{fmt_uk_date(r['invoice_date'])}</td>"
+                 f"<td class='mono' style='font-size:12px'>{fmt_uk_date(r['due_date'])}</td>"
+                 f"<td class='mono' style='text-align:right;color:{gcol}'>£{g:,.2f}</td>"
+                 f"<td class='mono' style='text-align:right'>£{(r['vat_amount'] or 0):,.2f}</td>"
+                 f"<td class='mono' style='text-align:right'>£{(r['net_amount'] or 0):,.2f}</td></tr>")
+    if not rows:
+        body = "<tr><td colspan='9' style='text-align:center;padding:24px;color:#94a3b8'>Set the criteria above and press <b>Run report</b>.</td></tr>"
+    cap = (f"<div style='font-size:12px;color:#b45309;padding:4px 0'>Showing first 2,000 of {len(rows):,} rows — the totals cover them all; use Excel export for the full list.</div>"
+           if len(rows) > 2000 else "")
+
+    from urllib.parse import urlencode
+    qs = urlencode({"report": report, "store": store, "supplier": supplier, "date_from": date_from,
+                    "date_to": date_to, "due_days": due_days, "exclude_dd": exclude_dd, "run": "1"})
+
+    content = f"""
+    <div class='flex justify-between items-center'>
+      <div class='text-2xl font-black text-slate-800'>📊 Reports</div>
+      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+    </div>
+    <form method='GET' action='/invoices/reports' class='card' style='margin-top:12px'>
+      <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'>
+        <div><label>Report</label><select name='report' id='rep' onchange='repFields()'>{rep_opts}</select></div>
+        <div><label>Store</label><select name='store'>
+          <option {store_opt('Both')}>Both</option>
+          <option {store_opt('Uxbridge')}>Uxbridge</option>
+          <option {store_opt('Newbury')}>Newbury</option></select></div>
+        <div data-f='supplier'><label>Supplier</label>
+          <input name='supplier' value="{supplier}" list='supplierlist' autocomplete='off' placeholder='(all suppliers)'>{supplier_datalist}</div>
+        <div data-f='dates'><label>Date from</label><input type='date' name='date_from' value='{date_from}'></div>
+        <div data-f='dates'><label>Date to</label><input type='date' name='date_to' value='{date_to}'></div>
+        <div data-f='due'><label>Due within (days)</label><input type='number' name='due_days' value='{due_days}' min='0' placeholder='e.g. 14'></div>
+      </div>
+      <div class='flex gap-3 mt-3 items-center'>
+        <button type='submit' name='run' value='1' class='btn-primary'>▶ Run report</button>
+        <label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#475569'>
+          <input type='checkbox' name='exclude_dd' value='1' {'checked' if exclude_dd == '1' else ''}> Exclude direct debits</label>
+      </div>
+    </form>
+    <div class='card' style='margin-top:12px'>
+      <div class='flex justify-between items-center mb-3'>
+        <div class='text-sm font-bold text-slate-600'>{labels[report]} — {len(rows):,} invoice(s)</div>
+        <div class='flex gap-2'>
+          <a href='/invoices/reports?{qs}&export=csv' class='btn-secondary' style='font-size:12px'>⬇️ Excel (CSV)</a>
+          <button type='button' onclick='window.print()' class='btn-secondary' style='font-size:12px'>🖨️ Print / PDF</button>
+        </div>
+      </div>
+      {cap}
+      <div style='overflow-x:auto'>
+        <table class='tbl'>
+          <thead><tr><th>Serial</th><th>Supplier</th><th>Store</th><th>Invoice No.</th>
+            <th>Inv. date</th><th>Due date</th>
+            <th style='text-align:right'>Amount</th><th style='text-align:right'>VAT</th><th style='text-align:right'>Net</th></tr></thead>
+          <tbody>{body}</tbody>
+          <tfoot><tr style='font-weight:800;border-top:2px solid #cbd5e1'>
+            <td colspan='6' style='padding:8px'>Totals — {len(rows):,} invoice(s)</td>
+            <td class='mono' style='text-align:right;padding:8px'>£{tot_g:,.2f}</td>
+            <td class='mono' style='text-align:right;padding:8px'>£{tot_v:,.2f}</td>
+            <td class='mono' style='text-align:right;padding:8px'>£{tot_n:,.2f}</td></tr></tfoot>
+        </table>
+      </div>
+    </div>
+    """ + """
+    <script>
+    function repFields() {
+      var r = document.getElementById('rep').value;
+      var m = {supplier:['supplier','dates'], overdue:['due'], period:['dates'], paid:['dates'], unpaid:[]};
+      var use = m[r] || [];
+      document.querySelectorAll('[data-f]').forEach(function(el){
+        var on = use.indexOf(el.getAttribute('data-f')) > -1;
+        el.style.opacity = on ? '1' : '0.45';
+        el.querySelectorAll('input,select').forEach(function(i){ i.disabled = !on; });
+      });
+    }
+    document.addEventListener('DOMContentLoaded', repFields);
+    </script>
+    """
+    return page("Reports", content, user, "invoices")
 
 
 @router.get("/invoices/supplier-terms", response_class=HTMLResponse)
