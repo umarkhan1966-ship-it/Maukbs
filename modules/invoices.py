@@ -428,6 +428,7 @@ def invoices_page(
     status:   str = "",
     pg:       int = 1,
     edit_id:  int = 0,
+    show_pdf: int = 0,
     sort:     str = "",
     dir:      str = "desc",
     msg:      str = "",
@@ -747,6 +748,9 @@ def invoices_page(
             </div>
           </div>
         </div>"""
+        # Opened from a report with &show_pdf=1 → auto-open the side-by-side PDF.
+        if show_pdf:
+            pdf_preview += f"<script>window.addEventListener('DOMContentLoaded',function(){{showPdf('{full_url}');}});</script>"
 
     # ── Audit line (edit mode): who entered it / who last edited it, and when ──
     audit_html = ""
@@ -2377,7 +2381,7 @@ def reports(session: str | None = Cookie(default=None),
         tot_v = round(sum(r["v"] or 0 for r in agg), 2)
         tot_n = round(sum(r["n"] or 0 for r in agg), 2)
     else:
-        rows = (q(f"""SELECT seq_no, supplier_name, store_name, invoice_number, invoice_date,
+        rows = (q(f"""SELECT invoice_id, seq_no, supplier_name, store_name, invoice_number, invoice_date,
                              due_date, paid_date, gross_amount, vat_amount, net_amount, is_paid
                       FROM supplier_invoices {where}
                       {order}""", tuple(params), fetch=True) or []) if do_run else []
@@ -2441,7 +2445,10 @@ def reports(session: str | None = Cookie(default=None),
         cur = st
         g = r["gross_amount"] or 0
         gcol = "#dc2626" if g < 0 else "#0f172a"
-        body += (f"<tr><td class='mono' style='font-size:12px;color:#94a3b8'>{r['seq_no'] or ''}</td>"
+        body += (f"<tr><td class='mono' style='font-size:12px'>"
+                 f"<a href='/invoices?ledger={r['store_name'] or ''}&edit_id={r['invoice_id']}&show_pdf=1' "
+                 f"target='_blank' style='color:#2563eb;font-weight:700;text-decoration:none' "
+                 f"title='Open this invoice in a new tab'>{r['seq_no'] or ''}</a></td>"
                  f"<td style='font-weight:700'>{r['supplier_name'] or ''}</td>"
                  f"<td style='font-size:12px'>{r['store_name'] or ''}</td>"
                  f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or ''}</td>"
