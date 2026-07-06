@@ -2282,7 +2282,7 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
 def reports(session: str | None = Cookie(default=None),
             report: str = "supplier", store: str = "Both", supplier: str = "",
             date_from: str = "", date_to: str = "", due_days: str = "14",
-            exclude_dd: str = "", sort: str = "", run: str = "", export: str = ""):
+            exclude_dd: str = "", sort: str = "", comment: str = "", run: str = "", export: str = ""):
     """Owner-only flexible reporting. The chosen report decides which filters
     apply (e.g. Overdue ignores the supplier box), and results carry totals."""
     redir, user = require_login(session)
@@ -2291,8 +2291,9 @@ def reports(session: str | None = Cookie(default=None),
         return RedirectResponse("/invoices?msg=Reports+is+owner-only&msg_type=error", status_code=303)
 
     REPORTS = [("supplier", "Supplier statement"), ("overdue", "Overdue / due window"),
-               ("period", "Period / quarterly"), ("paid", "Paid in a period"),
-               ("unpaid", "Unpaid (all outstanding)")]
+               ("upcoming", "Upcoming dues"), ("period", "Period / quarterly"),
+               ("paid", "Paid in a period"), ("unpaid", "Unpaid (all outstanding)"),
+               ("comment", "Comment search")]
     labels = dict(REPORTS)
     if report not in labels:
         report = "supplier"
@@ -2328,11 +2329,26 @@ def reports(session: str | None = Cookie(default=None),
     elif report == "unpaid":
         conds.append("is_paid!='Yes'")
         date_col = "due_date"
+    elif report == "upcoming":
+        if supplier.strip():
+            conds.append("supplier_name=?"); params.append(supplier.strip())
+        try: n = int(due_days)
+        except (TypeError, ValueError): n = 30
+        cutoff = (datetime.now() + timedelta(days=n)).strftime("%Y-%m-%d")
+        conds.append("is_paid!='Yes'")
+        conds.append("due_date IS NOT NULL AND due_date<>'' AND due_date<=?"); params.append(cutoff)
+        date_col = "due_date"
+    elif report == "comment":
+        if comment.strip():
+            conds.append("comments LIKE ?"); params.append(f"%{comment.strip()}%")
+        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
+        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
 
     # Sort: default sensibly per report, user-overridable; group by store first when "Both".
     if not sort:
-        sort = {"supplier": "invdate", "overdue": "duedate", "period": "supplier",
-                "paid": "invdate", "unpaid": "duedate"}.get(report, "supplier")
+        sort = {"supplier": "invdate", "overdue": "duedate", "upcoming": "duedate",
+                "period": "supplier", "paid": "invdate", "unpaid": "duedate",
+                "comment": "invdate"}.get(report, "supplier")
     sort_col = {"supplier": "supplier_name", "invdate": "invoice_date",
                 "duedate": "due_date", "amount": "gross_amount"}.get(sort, "supplier_name")
     grouped = (store == "Both")
@@ -2369,6 +2385,11 @@ def reports(session: str | None = Cookie(default=None),
                          + "</datalist>")
     rep_opts = "".join(f"<option value='{v}' {'selected' if v == report else ''}>{l}</option>" for v, l in REPORTS)
     store_opt = lambda s: "selected" if store == s else ""
+    _md, month_opts = datetime.now().replace(day=1), ""
+    for _ in range(18):
+        _m = _md.strftime("%b'%y")
+        month_opts += f"<option value=\"{_m}\">{_m}</option>"
+        _md = (_md - timedelta(days=1)).replace(day=1)
 
     shown = rows[:2000]
     store_tot = {}
@@ -2409,14 +2430,16 @@ def reports(session: str | None = Cookie(default=None),
 
     from urllib.parse import urlencode
     qs = urlencode({"report": report, "store": store, "supplier": supplier, "date_from": date_from,
-                    "date_to": date_to, "due_days": due_days, "exclude_dd": exclude_dd, "sort": sort, "run": "1"})
+                    "date_to": date_to, "due_days": due_days, "exclude_dd": exclude_dd, "sort": sort,
+                    "comment": comment, "run": "1"})
 
     content = f"""
-    <div class='flex justify-between items-center'>
+    <style>@media print {{ .noprint {{ display:none !important; }} .card {{ border:none !important; margin:0 !important; }} }}</style>
+    <div class='flex justify-between items-center noprint'>
       <div class='text-2xl font-black text-slate-800'>📊 Reports</div>
       <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
     </div>
-    <form method='GET' action='/invoices/reports' class='card' style='margin-top:12px'>
+    <form method='GET' action='/invoices/reports' class='card noprint' style='margin-top:12px'>
       <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'>
         <div><label>Report</label><select name='report' id='rep' onchange='repFields()'>{rep_opts}</select></div>
         <div><label>Store</label><select name='store'>
@@ -2433,6 +2456,9 @@ def reports(session: str | None = Cookie(default=None),
           <option value='invdate' {'selected' if sort == 'invdate' else ''}>Invoice date</option>
           <option value='duedate' {'selected' if sort == 'duedate' else ''}>Due date</option>
           <option value='amount' {'selected' if sort == 'amount' else ''}>Amount</option></select></div>
+        <div data-f='comment'><label>Comment contains</label>
+          <input name='comment' id='cmt' value="{comment}" placeholder='text in the comment'>
+          <select id='cmtmonth' style='margin-top:4px;font-size:12px'><option value=''>— quick fill: filed month —</option>{month_opts}</select></div>
       </div>
       <div class='flex gap-3 mt-3 items-center'>
         <button type='submit' name='run' value='1' class='btn-primary'>▶ Run report</button>
@@ -2443,7 +2469,7 @@ def reports(session: str | None = Cookie(default=None),
     <div class='card' style='margin-top:12px'>
       <div class='flex justify-between items-center mb-3'>
         <div class='text-sm font-bold text-slate-600'>{labels[report]} — {len(rows):,} invoice(s)</div>
-        <div class='flex gap-2'>
+        <div class='flex gap-2 noprint'>
           <a href='/invoices/reports?{qs}&export=csv' class='btn-secondary' style='font-size:12px'>⬇️ Excel (CSV)</a>
           <button type='button' onclick='window.print()' class='btn-secondary' style='font-size:12px'>🖨️ Print / PDF</button>
         </div>
@@ -2467,7 +2493,8 @@ def reports(session: str | None = Cookie(default=None),
     <script>
     function repFields() {
       var r = document.getElementById('rep').value;
-      var m = {supplier:['supplier','dates'], overdue:['due'], period:['dates'], paid:['dates'], unpaid:[]};
+      var m = {supplier:['supplier','dates'], overdue:['due'], upcoming:['supplier','due'],
+               period:['dates'], paid:['dates'], unpaid:[], comment:['comment','dates']};
       var use = m[r] || [];
       document.querySelectorAll('[data-f]').forEach(function(el){
         var on = use.indexOf(el.getAttribute('data-f')) > -1;
@@ -2476,6 +2503,10 @@ def reports(session: str | None = Cookie(default=None),
       });
     }
     document.addEventListener('DOMContentLoaded', repFields);
+    var mp = document.getElementById('cmtmonth');
+    if (mp) mp.addEventListener('change', function(){
+      if (mp.value) { document.getElementById('cmt').value = 'Filed at the start of ' + mp.value; }
+    });
     </script>
     """
     return page("Reports", content, user, "invoices")
