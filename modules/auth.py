@@ -1,5 +1,5 @@
 """auth routes."""
-import os, io, re, uuid, math, shutil, secrets, hashlib
+import os, io, re, uuid, math, shutil, secrets, hashlib, html
 from datetime import datetime, timedelta, date
 from fastapi import APIRouter, Request, Form, Cookie, UploadFile, File
 from fastapi.responses import (HTMLResponse, RedirectResponse, FileResponse,
@@ -18,7 +18,9 @@ router = APIRouter()
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
-    err_html = f"<p class='flash-error'>{error}</p>" if error else ""
+    # Escape the error text before reflecting it into the page, so a crafted
+    # /login?error=... link can't inject HTML/script (reflected-XSS guard).
+    err_html = f"<p class='flash-error'>{html.escape(error)}</p>" if error else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
