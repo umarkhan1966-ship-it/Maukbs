@@ -1,5 +1,5 @@
 """invoices routes."""
-import os, io, re, uuid, math, shutil, secrets, hashlib
+import os, io, re, uuid, math, shutil, secrets, hashlib, html
 from datetime import datetime, timedelta, date
 from fastapi import APIRouter, Request, Form, Cookie, UploadFile, File
 from fastapi.responses import (HTMLResponse, RedirectResponse, FileResponse,
@@ -595,7 +595,7 @@ def invoices_page(
             dis = "disabled" if lock else ""
             return f"<div><label>{label}{mark}</label><select name='{name}' {req_attr} {dis} {style_attr}>{o_html}</select></div>"
         list_attr = f"list='{dlist}' autocomplete='off'" if dlist else ""
-        return f"<div><label>{label}{mark}</label><input type='{ftype}' name='{name}' value='{safe_val}' {req_attr} {step} {ph} {ro} {list_attr} {style_attr}></div>"
+        return f"<div><label>{label}{mark}</label><input type='{ftype}' name='{name}' value='{html.escape(str(safe_val), quote=True)}' {req_attr} {step} {ph} {ro} {list_attr} {style_attr}></div>"
 
     # Payment status fields (only show if editing)
     payment_fields = ""
@@ -1510,15 +1510,15 @@ async def save_invoice(
     </a>
     <form method='POST' action='/invoices/save/0'>
       <input type='hidden' name='ledger'          value='{ledger}'>
-      <input type='hidden' name='supplier_name'   value='{supplier}'>
-      <input type='hidden' name='invoice_number'  value='{inv_no}'>
+      <input type='hidden' name='supplier_name'   value='{html.escape(str(supplier), quote=True)}'>
+      <input type='hidden' name='invoice_number'  value='{html.escape(str(inv_no), quote=True)}'>
       <input type='hidden' name='invoice_date'    value='{fv("invoice_date")}'>
       <input type='hidden' name='due_date'        value='{fv("due_date")}'>
       <input type='hidden' name='gross_amount'    value='{gross}'>
       <input type='hidden' name='vat_amount'      value='{vat}'>
       <input type='hidden' name='net_amount'      value='{net}'>
       <input type='hidden' name='payment_terms'   value='{terms or ""}'>
-      <input type='hidden' name='comments'        value='{fv("comments")}'>
+      <input type='hidden' name='comments'        value='{html.escape(fv("comments") or "", quote=True)}'>
       <input type='hidden' name='seq_no'          value='{seq_no or ""}'>
       <input type='hidden' name='force_save'      value='1'>
       <button type='submit' style='width:100%;background:#dc2626;color:white;font-weight:700;padding:12px;border-radius:10px;font-size:14px;border:none;cursor:pointer'>
