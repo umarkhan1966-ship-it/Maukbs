@@ -2316,11 +2316,19 @@ def reports(session: str | None = Cookie(default=None),
         if date_from: conds.append("invoice_date>=?"); params.append(date_from)
         if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
     elif report == "overdue":
-        try: n = int(due_days)
-        except (TypeError, ValueError): n = 0
-        cutoff = (datetime.now() + timedelta(days=n)).strftime("%Y-%m-%d")
         conds.append("is_paid!='Yes'")
-        conds.append("due_date IS NOT NULL AND due_date<>'' AND due_date<=?"); params.append(cutoff)
+        conds.append("due_date IS NOT NULL AND due_date<>''")
+        # Upper bound: an explicit "Date to" (owner's choice) overrides the
+        # relative "due within N days" window; blank dates = catch everything.
+        if date_to:
+            conds.append("due_date<=?"); params.append(date_to)
+        else:
+            try: n = int(due_days)
+            except (TypeError, ValueError): n = 0
+            cutoff = (datetime.now() + timedelta(days=n)).strftime("%Y-%m-%d")
+            conds.append("due_date<=?"); params.append(cutoff)
+        if date_from:
+            conds.append("due_date>=?"); params.append(date_from)
         date_col = "due_date"
     elif report == "period":
         if date_from: conds.append("invoice_date>=?"); params.append(date_from)
@@ -2560,7 +2568,7 @@ def reports(session: str | None = Cookie(default=None),
     <script>
     function repFields() {
       var r = document.getElementById('rep').value;
-      var m = {supplier:['supplier','dates'], overdue:['due'], upcoming:['supplier','due'],
+      var m = {supplier:['supplier','dates'], overdue:['due','dates'], upcoming:['supplier','due'],
                period:['dates'], paid:['dates'], unpaid:[], spend:['dates'], comment:['comment']};
       var use = m[r] || [];
       document.querySelectorAll('[data-f]').forEach(function(el){
