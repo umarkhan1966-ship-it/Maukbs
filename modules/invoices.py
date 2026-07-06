@@ -2282,7 +2282,7 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
 def reports(session: str | None = Cookie(default=None),
             report: str = "supplier", store: str = "Both", supplier: str = "",
             date_from: str = "", date_to: str = "", due_days: str = "14",
-            exclude_dd: str = "", run: str = "", export: str = ""):
+            exclude_dd: str = "", sort: str = "", run: str = "", export: str = ""):
     """Owner-only flexible reporting. The chosen report decides which filters
     apply (e.g. Overdue ignores the supplier box), and results carry totals."""
     redir, user = require_login(session)
@@ -2329,12 +2329,20 @@ def reports(session: str | None = Cookie(default=None),
         conds.append("is_paid!='Yes'")
         date_col = "due_date"
 
+    # Sort: default sensibly per report, user-overridable; group by store first when "Both".
+    if not sort:
+        sort = {"supplier": "invdate", "overdue": "duedate", "period": "supplier",
+                "paid": "invdate", "unpaid": "duedate"}.get(report, "supplier")
+    sort_col = {"supplier": "supplier_name", "invdate": "invoice_date",
+                "duedate": "due_date", "amount": "gross_amount"}.get(sort, "supplier_name")
+    grouped = (store == "Both")
+    order = f"ORDER BY {'store_name, ' if grouped else ''}{sort_col}, invoice_date"
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     do_run = (run == "1" or export == "csv")
     rows = (q(f"""SELECT seq_no, supplier_name, store_name, invoice_number, invoice_date,
                          due_date, paid_date, gross_amount, vat_amount, net_amount, is_paid
                   FROM supplier_invoices {where}
-                  ORDER BY {date_col}, supplier_name""", tuple(params), fetch=True) or []) if do_run else []
+                  {order}""", tuple(params), fetch=True) or []) if do_run else []
     tot_g = round(sum(r["gross_amount"] or 0 for r in rows), 2)
     tot_v = round(sum(r["vat_amount"]   or 0 for r in rows), 2)
     tot_n = round(sum(r["net_amount"]   or 0 for r in rows), 2)
@@ -2363,8 +2371,24 @@ def reports(session: str | None = Cookie(default=None),
     store_opt = lambda s: "selected" if store == s else ""
 
     shown = rows[:2000]
-    body = ""
+    store_tot = {}
+    for r in rows:
+        st = r["store_name"] or ""
+        a = store_tot.get(st, [0.0, 0.0, 0.0])
+        a[0] += r["gross_amount"] or 0; a[1] += r["vat_amount"] or 0; a[2] += r["net_amount"] or 0
+        store_tot[st] = a
+    def subtot(st, a):
+        return (f"<tr style='background:#eef2f7;font-weight:700'>"
+                f"<td colspan='6' style='padding:6px 8px'>{st} sub-total</td>"
+                f"<td class='mono' style='text-align:right;padding:6px 8px'>£{a[0]:,.2f}</td>"
+                f"<td class='mono' style='text-align:right;padding:6px 8px'>£{a[1]:,.2f}</td>"
+                f"<td class='mono' style='text-align:right;padding:6px 8px'>£{a[2]:,.2f}</td></tr>")
+    body = ""; cur = None
     for r in shown:
+        st = r["store_name"] or ""
+        if grouped and cur is not None and st != cur:
+            body += subtot(cur, store_tot.get(cur, [0, 0, 0]))
+        cur = st
         g = r["gross_amount"] or 0
         gcol = "#dc2626" if g < 0 else "#0f172a"
         body += (f"<tr><td class='mono' style='font-size:12px;color:#94a3b8'>{r['seq_no'] or ''}</td>"
@@ -2376,6 +2400,8 @@ def reports(session: str | None = Cookie(default=None),
                  f"<td class='mono' style='text-align:right;color:{gcol}'>£{g:,.2f}</td>"
                  f"<td class='mono' style='text-align:right'>£{(r['vat_amount'] or 0):,.2f}</td>"
                  f"<td class='mono' style='text-align:right'>£{(r['net_amount'] or 0):,.2f}</td></tr>")
+    if grouped and cur is not None:
+        body += subtot(cur, store_tot.get(cur, [0, 0, 0]))
     if not rows:
         body = "<tr><td colspan='9' style='text-align:center;padding:24px;color:#94a3b8'>Set the criteria above and press <b>Run report</b>.</td></tr>"
     cap = (f"<div style='font-size:12px;color:#b45309;padding:4px 0'>Showing first 2,000 of {len(rows):,} rows — the totals cover them all; use Excel export for the full list.</div>"
@@ -2383,7 +2409,7 @@ def reports(session: str | None = Cookie(default=None),
 
     from urllib.parse import urlencode
     qs = urlencode({"report": report, "store": store, "supplier": supplier, "date_from": date_from,
-                    "date_to": date_to, "due_days": due_days, "exclude_dd": exclude_dd, "run": "1"})
+                    "date_to": date_to, "due_days": due_days, "exclude_dd": exclude_dd, "sort": sort, "run": "1"})
 
     content = f"""
     <div class='flex justify-between items-center'>
@@ -2401,7 +2427,12 @@ def reports(session: str | None = Cookie(default=None),
           <input name='supplier' value="{supplier}" list='supplierlist' autocomplete='off' placeholder='(all suppliers)'>{supplier_datalist}</div>
         <div data-f='dates'><label>Date from</label><input type='date' name='date_from' value='{date_from}'></div>
         <div data-f='dates'><label>Date to</label><input type='date' name='date_to' value='{date_to}'></div>
-        <div data-f='due'><label>Due within (days)</label><input type='number' name='due_days' value='{due_days}' min='0' placeholder='e.g. 14'></div>
+        <div data-f='due'><label>Show due within (days)</label><input type='number' name='due_days' value='{due_days}' min='0' placeholder='0 = overdue only'></div>
+        <div><label>Sort by</label><select name='sort'>
+          <option value='supplier' {'selected' if sort == 'supplier' else ''}>Supplier</option>
+          <option value='invdate' {'selected' if sort == 'invdate' else ''}>Invoice date</option>
+          <option value='duedate' {'selected' if sort == 'duedate' else ''}>Due date</option>
+          <option value='amount' {'selected' if sort == 'amount' else ''}>Amount</option></select></div>
       </div>
       <div class='flex gap-3 mt-3 items-center'>
         <button type='submit' name='run' value='1' class='btn-primary'>▶ Run report</button>
