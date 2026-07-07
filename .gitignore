@@ -32,6 +32,27 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Claude Code local settings
+.claude/
+
+# Credentials / secrets — NEVER commit
+.env
+*.env
+*Logins*.txt
+*ogin*.txt
+Chat url.txt
+
+# Local dev / one-off maintenance scripts (not part of the deployed app)
+/_import_*.py
+/import_*.py
+/fix_*.py
+/check_*.py
+/debug_*.py
+/add_demo_rota.py
+/cleanup_duplicates.py
+/create_test_user.py
+/full_reset.py
+
 # Accidental zero-byte junk files
 /18
 /INFO

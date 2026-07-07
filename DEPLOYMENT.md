@@ -93,9 +93,8 @@ After copying, restart the service and confirm the invoice counts match
 
 ## 7. Known follow-ups (not blocking invoices go-live)
 
-- **Staff document templates** (`doc_templates/*.dotx`) are git-ignored and won't
-  deploy. They're only needed when the staff contract/letter feature goes live —
-  upload them to the volume (or un-ignore them) at that point.
+- **Staff document templates** (`doc_templates/*.docx`) are in the repo and deploy
+  with the app. (Any `*.dotx` templates are git-ignored — save new ones as `.docx`.)
 - **Two-factor login** or restricting access to the stores' IP addresses — optional
   extra hardening if you ever want it tighter.
 - **Postgres** — only if you outgrow SQLite; not needed at current scale.
