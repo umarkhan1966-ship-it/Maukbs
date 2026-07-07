@@ -11,7 +11,7 @@ from core import schema
 app = FastAPI()
 schema.init_db()
 
-from modules import auth, general, profile, invoices, staff, rota, timesheets, sales
+from modules import auth, general, profile, invoices, staff, rota, timesheets, sales, users_admin
 
-for _mod in (auth, general, profile, invoices, staff, rota, timesheets, sales):
+for _mod in (auth, general, profile, invoices, staff, rota, timesheets, sales, users_admin):
     app.include_router(_mod.router)

@@ -17,6 +17,7 @@ def page(title: str, content: str, user: dict, active: str = "") -> str:
         ("Rota",        "/rota",          "&#128197;","manager"),
         ("Timesheets",  "/timesheets",    "&#9200;",  "manager"),
         ("Property",    "/property",      "&#127968;","owner"),
+        ("Users",       "/manage-users",  "&#128273;","owner"),
         ("Settings",    "/settings",      "&#9881;",  "owner"),
     ]
 

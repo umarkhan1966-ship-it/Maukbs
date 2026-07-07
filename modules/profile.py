@@ -18,9 +18,30 @@ router = APIRouter()
 
 
 @router.get("/my-profile", response_class=HTMLResponse)
-def my_profile(session: str | None = Cookie(default=None), msg: str = ""):
+def my_profile(session: str | None = Cookie(default=None), msg: str = "", msg_type: str = "success"):
     redir, user = require_login(session)
     if redir: return redir
+
+    flash = ""
+    if msg:
+        cls = "flash-success" if msg_type == "success" else "flash-error"
+        flash = f"<div class='{cls}'>{msg}</div>"
+
+    # Change-your-own-password card — shown to every logged-in user, whether or
+    # not they have a linked staff profile (so the owner can use it too).
+    pw_card = """
+    <div class='card'>
+      <div style='font-weight:900;color:#0f2942;margin-bottom:4px'>&#128273; Change Password</div>
+      <div style='font-size:12px;color:#94a3b8;margin-bottom:16px'>
+        Change your own password here. Choose something only you know (at least 6 characters).</div>
+      <form action='/my-profile/password' method='POST' class='grid gap-3'
+            style='grid-template-columns:repeat(auto-fit,minmax(200px,1fr))'>
+        <div><label>Current password</label><input type='password' name='current' required></div>
+        <div><label>New password</label><input type='password' name='new' required minlength='6'></div>
+        <div><label>Confirm new password</label><input type='password' name='confirm' required minlength='6'></div>
+        <div style='grid-column:1/-1'><button type='submit' class='btn-primary'>Update password</button></div>
+      </form>
+    </div>"""
 
     # Find staff profile by matching full name to username
     full_name = user.get("full_name", "")
@@ -29,19 +50,20 @@ def my_profile(session: str | None = Cookie(default=None), msg: str = ""):
                 AND is_active = 1""", (full_name,), fetch=True)
 
     if not rows:
-        content = """
+        content = f"""
+        {flash}
         <div class='text-2xl font-black text-slate-800'>My Profile</div>
         <div class='card'>
           <p style='color:#64748b'>No staff profile linked to your account yet.
           Please contact your manager.</p>
-        </div>"""
+        </div>
+        {pw_card}"""
         return page("My Profile", content, user, "my profile")
 
     s     = dict(rows[0])
     sid   = s["staff_id"]
     year  = datetime.now().year
     leave = get_leave_summary(sid, year)
-    flash = f"<div class='flash-success'>{msg}</div>" if msg else ""
 
     content = f"""
     {flash}
@@ -107,7 +129,10 @@ def my_profile(session: str | None = Cookie(default=None), msg: str = ""):
     <div class='card'>
       <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>&#128197; Request Leave</div>
       <a href='/staff/{sid}/request-leave' class='btn-primary'>Submit Leave Request</a>
-    </div>"""
+    </div>
+
+    <!-- Change your own password -->
+    {pw_card}"""
 
     return page("My Profile", content, user, "my profile")
 
@@ -133,3 +158,27 @@ async def save_my_profile(request: Request, session: str | None = Cookie(default
 
     from urllib.parse import quote as uq
     return RedirectResponse(f"/my-profile?msg={uq('Profile updated successfully')}", status_code=303)
+
+
+@router.post("/my-profile/password")
+async def change_my_password(request: Request, session: str | None = Cookie(default=None)):
+    """Let any logged-in user change their OWN password (verifies the current
+    one first). Owner resets others' passwords via Manage Users."""
+    redir, user = require_login(session)
+    if redir: return redir
+
+    from urllib.parse import quote as uq
+    form    = await request.form()
+    current = str(form.get("current", "") or "")
+    new     = str(form.get("new", "") or "")
+    confirm = str(form.get("confirm", "") or "")
+
+    if not verify_password(current, user.get("password", "")):
+        return RedirectResponse(f"/my-profile?msg={uq('Current password is incorrect.')}&msg_type=error", status_code=303)
+    if len(new) < 6:
+        return RedirectResponse(f"/my-profile?msg={uq('New password must be at least 6 characters.')}&msg_type=error", status_code=303)
+    if new != confirm:
+        return RedirectResponse(f"/my-profile?msg={uq('New passwords do not match.')}&msg_type=error", status_code=303)
+
+    q("UPDATE users SET password=? WHERE username=?", (hash_password(new), user["username"]))
+    return RedirectResponse(f"/my-profile?msg={uq('Password updated.')}", status_code=303)
