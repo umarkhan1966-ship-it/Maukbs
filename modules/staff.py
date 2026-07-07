@@ -886,10 +886,11 @@ def pay_overview(session: str | None = Cookie(default=None)):
     return page("Pay Overview", content, user, "staff")
 
 
-DOCS_DIR      = "staff_docs"
+from core.paths import data_path
+DOCS_DIR      = data_path("staff_docs")   # generated docs → persistent volume
 
 
-TEMPLATES_DIR = "doc_templates"
+TEMPLATES_DIR = "doc_templates"           # shipped assets → stay next to the code
 
 
 DOC_TYPES = [

@@ -15,6 +15,36 @@ from core.rota_utils import (calc_paid_hours, parse_hours,
 
 router = APIRouter()
 
+# ── Brute-force guard: throttle failed logins per client IP ──
+# In-memory (single instance); resets on restart, which is fine for our scale.
+import time as _time
+_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOCK_MAX    = 8      # this many failed attempts…
+_LOCK_WINDOW = 900    # …within this many seconds → temporary block
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:                                   # behind a host's proxy → real IP
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _too_many(ip: str) -> bool:
+    now  = _time.time()
+    hits = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < _LOCK_WINDOW]
+    _LOGIN_FAILS[ip] = hits
+    return len(hits) >= _LOCK_MAX
+
+
+def _record_fail(ip: str) -> None:
+    _LOGIN_FAILS.setdefault(ip, []).append(_time.time())
+
+
+# Send the Secure flag on the session cookie in production (HTTPS). Set the env
+# var SECURE_COOKIES=1 on the host; leave unset for local http on 127.0.0.1.
+_SECURE_COOKIES = os.environ.get("SECURE_COOKIES", "") == "1"
+
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
@@ -63,12 +93,21 @@ def login_page(error: str = ""):
 
 
 @router.post("/login")
-def do_login(username: str = Form(...), password: str = Form(...)):
+def do_login(request: Request, username: str = Form(...), password: str = Form(...)):
+    ip = _client_ip(request)
+    if _too_many(ip):
+        return RedirectResponse(
+            "/login?error=Too+many+attempts.+Please+wait+a+few+minutes+and+try+again.",
+            status_code=303)
+
     rows = q("SELECT * FROM users WHERE username=? AND is_active=1",
              (username,), fetch=True)
     user = dict(rows[0]) if rows else None
     if not user or not verify_password(password, user["password"]):
+        _record_fail(ip)
         return RedirectResponse("/login?error=Invalid+username+or+password", status_code=303)
+
+    _LOGIN_FAILS.pop(ip, None)   # successful login clears the counter
 
     # Transparently upgrade legacy unsalted hashes on successful login.
     if not user["password"].startswith("pbkdf2_sha256$"):
@@ -84,7 +123,7 @@ def do_login(username: str = Form(...), password: str = Form(...)):
 
     resp = RedirectResponse("/", status_code=303)
     resp.set_cookie("session", token, httponly=True, samesite="lax",
-                    max_age=86400 * 7)
+                    secure=_SECURE_COOKIES, max_age=86400 * 7)
     return resp
 
 

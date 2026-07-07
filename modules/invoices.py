@@ -306,7 +306,8 @@ def extract_pdf_data(pdf_bytes: bytes) -> dict:
     return result
 
 
-UPLOAD_DIR = "invoice_pdfs"
+from core.paths import data_path
+UPLOAD_DIR = data_path("invoice_pdfs")   # on the persistent volume when DATA_DIR is set
 
 
 PAYMENT_METHODS = ["", "Direct Debit", "Card", "Cash", "Cheque", "Online", "Amex", "Credit Note"]

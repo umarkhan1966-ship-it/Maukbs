@@ -1,7 +1,10 @@
 """Database connection + query helpers."""
 import sqlite3
+from core.paths import data_path
 
-DB_FILE = "business_vault.db"
+# Lives under DATA_DIR so a cloud persistent volume keeps it across redeploys;
+# with DATA_DIR unset this is just "business_vault.db" (unchanged locally).
+DB_FILE = data_path("business_vault.db")
 
 
 def db():

@@ -15,6 +15,7 @@ business_vault.backup_*.db
 # Uploaded / generated files
 invoice_pdfs/
 staff_docs/
+backups/
 
 # Source spreadsheets & documents (large binary business data)
 *.xls
