@@ -2400,8 +2400,19 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
             </table>
           </div>
         </div>"""
-        head_extra = (f"<a href='/invoices/combined-pdf?sent_date={sent_date}' class='btn-primary'>⬇️ Download combined PDF</a>"
-                      f"<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>")
+        # One combined PDF per store/property in this batch (separate companies →
+        # separate files), each in invoice-date order.
+        from urllib.parse import quote as _q
+        _locs = q("""SELECT DISTINCT loc FROM (
+                       SELECT store_name loc FROM supplier_invoices WHERE accountant_sent_date=?
+                       UNION SELECT property_name FROM property_invoices WHERE accountant_sent_date=?
+                     ) WHERE loc IS NOT NULL AND loc<>'' ORDER BY loc""",
+                  (sent_date, sent_date), fetch=True) or []
+        _dl = "".join(
+            f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(l['loc'])}' "
+            f"class='btn-primary' style='font-size:12px'>⬇️ {l['loc']} PDF</a>"
+            for l in _locs)
+        head_extra = _dl + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
     else:
         batches = q("""
             SELECT d, SUM(n) n, SUM(t) t FROM (
@@ -2445,7 +2456,7 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
 
 
 @router.get("/invoices/combined-pdf")
-def combined_pdf(sent_date: str = "", session: str | None = Cookie(default=None)):
+def combined_pdf(sent_date: str = "", loc: str = "", session: str | None = Cookie(default=None)):
     """Owner-only: merge every attached invoice PDF in one accountant batch (a
     given accountant_sent_date, retail + property) into a single PDF to email —
     replaces the manual chore of combining 30-80 files by hand. Image scans are
@@ -2457,14 +2468,16 @@ def combined_pdf(sent_date: str = "", session: str | None = Cookie(default=None)
     if not sent_date:
         return HTMLResponse("<p>No batch date given.</p>", status_code=400)
 
-    rows = q("""SELECT loc, supplier_name, seq_no, pdf_path FROM (
-                  SELECT store_name loc, supplier_name, seq_no, pdf_path
+    # Invoices in this batch for the chosen store/property (loc), in DATE order —
+    # each store/property trades as its own company, so it gets its own file.
+    rows = q("""SELECT pdf_path FROM (
+                  SELECT store_name loc, invoice_date, seq_no, pdf_path
                     FROM supplier_invoices WHERE accountant_sent_date=?
                   UNION ALL
-                  SELECT property_name, supplier_name, seq_no, pdf_path
+                  SELECT property_name loc, invoice_date, seq_no, pdf_path
                     FROM property_invoices WHERE accountant_sent_date=?
-                ) ORDER BY loc, supplier_name, seq_no""",
-             (sent_date, sent_date), fetch=True) or []
+                ) WHERE (?='' OR loc=?) ORDER BY invoice_date, seq_no""",
+             (sent_date, sent_date, loc, loc), fetch=True) or []
     paths = [r["pdf_path"] for r in rows if r["pdf_path"]]
 
     MAXN = 400
@@ -2500,7 +2513,8 @@ def combined_pdf(sent_date: str = "", session: str | None = Cookie(default=None)
     if len(writer.pages) == 0:
         return HTMLResponse("<p>Could not read any of the attached documents in this batch.</p>", status_code=404)
     out = io.BytesIO(); writer.write(out)
-    fn = f"Accountant_batch_{sent_date}.pdf"
+    _locpart = (loc.replace(' ', '_').replace('/', '-') + "_") if loc else ""
+    fn = f"Accountant_{_locpart}{sent_date}.pdf"
     return Response(out.getvalue(), media_type="application/pdf",
                     headers={"Content-Disposition": f"attachment; filename={fn}"})
 
