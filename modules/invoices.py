@@ -1271,6 +1271,7 @@ def invoices_page(
       {"<a href='/invoices/dd-collection' class='btn-secondary'>🏦 DD Collection Check</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send to Accountant</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/reports' class='btn-secondary'>📊 Reports</a>" if user.get('role') == 'owner' else ''}
+      {"<a href='/invoices/property-reports' class='btn-secondary'>🏠 Property Reports</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/supplier-terms' class='btn-secondary'>📅 Supplier Terms</a>" if user.get('role') == 'owner' else ''}
     </div>"""
 
@@ -2586,6 +2587,260 @@ def reports(session: str | None = Cookie(default=None),
     </script>
     """
     return page("Reports", content, user, "invoices")
+
+
+@router.get("/invoices/property-reports", response_class=HTMLResponse)
+def property_reports(session: str | None = Cookie(default=None),
+                     report: str = "all", prop: str = "All", supplier: str = "",
+                     date_from: str = "", date_to: str = "", due_days: str = "14",
+                     sort: str = "", run: str = "", export: str = ""):
+    """Owner-only property reporting — one combined view across ALL properties
+    (104 Dane / 26 Ampth / 53 Ampth / MREL) plus a few reports. View/report only;
+    entering invoices is unchanged (still per-property)."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Reports+is+owner-only&msg_type=error", status_code=303)
+
+    REPORTS = [("all", "All properties (list)"), ("overdue", "Overdue / unpaid"),
+               ("spend", "Spend per property"), ("supplier", "Spend per supplier")]
+    labels = dict(REPORTS)
+    if report not in labels:
+        report = "all"
+
+    _props = q("SELECT DISTINCT property_name p FROM property_invoices WHERE property_name IS NOT NULL AND property_name<>'' ORDER BY property_name", (), fetch=True) or []
+    prop_names = [r["p"] for r in _props]
+
+    conds, params = [], []
+    if prop != "All" and prop in prop_names:
+        conds.append("property_name=?"); params.append(prop)
+
+    if report == "all":
+        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
+        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
+    elif report == "overdue":
+        conds.append("is_paid!='Yes'")
+        conds.append("due_date IS NOT NULL AND due_date<>''")
+        if date_to:
+            conds.append("due_date<=?"); params.append(date_to)
+        else:
+            try: n = int(due_days)
+            except (TypeError, ValueError): n = 0
+            cutoff = (datetime.now() + timedelta(days=n)).strftime("%Y-%m-%d")
+            conds.append("due_date<=?"); params.append(cutoff)
+        if date_from:
+            conds.append("due_date>=?"); params.append(date_from)
+    elif report == "spend":
+        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
+        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
+    elif report == "supplier":
+        if supplier.strip():
+            conds.append("supplier_name=?"); params.append(supplier.strip())
+        if date_from: conds.append("invoice_date>=?"); params.append(date_from)
+        if date_to:   conds.append("invoice_date<=?"); params.append(date_to)
+
+    if not sort:
+        sort = {"all": "invdate", "overdue": "duedate"}.get(report, "property")
+    sort_col = {"property": "property_name", "supplier": "supplier_name",
+                "invdate": "invoice_date", "duedate": "due_date", "amount": "gross_amount"}.get(sort, "property_name")
+    grouped = (prop == "All")
+    order = f"ORDER BY {'property_name, ' if grouped else ''}{sort_col}, invoice_date"
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    do_run = (run == "1" or export == "csv")
+    agg_by = {"spend": "property_name", "supplier": "supplier_name"}.get(report)
+
+    agg = []
+    if agg_by:
+        agg = (q(f"""SELECT {agg_by} AS k, COUNT(*) AS c,
+                            COALESCE(SUM(gross_amount),0) AS g,
+                            COALESCE(SUM(vat_amount),0)   AS v,
+                            COALESCE(SUM(net_amount),0)   AS n
+                     FROM property_invoices {where}
+                     GROUP BY {agg_by} ORDER BY SUM(gross_amount) DESC""",
+                 tuple(params), fetch=True) or []) if do_run else []
+        rows = []
+        tot_g = round(sum(r["g"] or 0 for r in agg), 2)
+        tot_v = round(sum(r["v"] or 0 for r in agg), 2)
+        tot_n = round(sum(r["n"] or 0 for r in agg), 2)
+    else:
+        rows = (q(f"""SELECT invoice_id, seq_no, supplier_name, property_name, invoice_number, invoice_date,
+                             due_date, paid_date, gross_amount, vat_amount, net_amount, is_paid
+                      FROM property_invoices {where}
+                      {order}""", tuple(params), fetch=True) or []) if do_run else []
+        tot_g = round(sum(r["gross_amount"] or 0 for r in rows), 2)
+        tot_v = round(sum(r["vat_amount"]   or 0 for r in rows), 2)
+        tot_n = round(sum(r["net_amount"]   or 0 for r in rows), 2)
+
+    if export == "csv":
+        import csv
+        buf = io.StringIO(); w = csv.writer(buf)
+        if agg_by:
+            head = "Property" if agg_by == "property_name" else "Supplier"
+            w.writerow([head, "Invoices", "Amount", "VAT", "Net"])
+            for r in agg:
+                w.writerow([r["k"], r["c"], r["g"], r["v"], r["n"]])
+            w.writerow([]); w.writerow([f"Totals ({len(agg)})", sum(r["c"] for r in agg), tot_g, tot_v, tot_n])
+        else:
+            w.writerow(["Serial", "Supplier", "Property", "Invoice No", "Invoice Date",
+                        "Due Date", "Paid Date", "Amount", "VAT", "Net", "Status"])
+            for r in rows:
+                w.writerow([r["seq_no"], r["supplier_name"], r["property_name"], r["invoice_number"],
+                            r["invoice_date"], r["due_date"], r["paid_date"],
+                            r["gross_amount"], r["vat_amount"], r["net_amount"], r["is_paid"]])
+            w.writerow([]); w.writerow(["Totals", f"{len(rows)} invoices", "", "", "", "", "",
+                                        tot_g, tot_v, tot_n, ""])
+        fn = f"property_report_{report}_{datetime.now().strftime('%Y%m%d')}.csv"
+        return Response(buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename={fn}"})
+
+    from urllib.parse import urlencode, quote as _q
+    _sup = q("SELECT DISTINCT supplier_name s FROM property_invoices WHERE supplier_name IS NOT NULL AND supplier_name<>'' ORDER BY supplier_name", (), fetch=True) or []
+    supplier_datalist = ("<datalist id='psupplierlist'>"
+                         + "".join(f"<option value=\"{(r['s'] or '').replace(chr(34), '&quot;')}\">" for r in _sup)
+                         + "</datalist>")
+    rep_opts = "".join(f"<option value='{v}' {'selected' if v == report else ''}>{l}</option>" for v, l in REPORTS)
+    prop_opts = (f"<option value='All' {'selected' if prop == 'All' else ''}>All properties</option>"
+                 + "".join(f"<option value=\"{html.escape(str(p))}\" {'selected' if prop == p else ''}>{html.escape(str(p))}</option>" for p in prop_names))
+
+    shown = rows[:2000]
+    prop_tot = {}
+    for r in rows:
+        k = r["property_name"] or ""
+        a = prop_tot.get(k, [0.0, 0.0, 0.0])
+        a[0] += r["gross_amount"] or 0; a[1] += r["vat_amount"] or 0; a[2] += r["net_amount"] or 0
+        prop_tot[k] = a
+    def subtot(k, a):
+        return (f"<tr style='background:#eef2f7;font-weight:700'>"
+                f"<td colspan='6' style='padding:6px 8px'>{k} sub-total</td>"
+                f"<td class='mono' style='text-align:right;padding:6px 8px'>£{a[0]:,.2f}</td>"
+                f"<td class='mono' style='text-align:right;padding:6px 8px'>£{a[1]:,.2f}</td>"
+                f"<td class='mono' style='text-align:right;padding:6px 8px'>£{a[2]:,.2f}</td></tr>")
+    body = ""; cur = None
+    for r in shown:
+        k = r["property_name"] or ""
+        if grouped and cur is not None and k != cur:
+            body += subtot(cur, prop_tot.get(cur, [0, 0, 0]))
+        cur = k
+        g = r["gross_amount"] or 0
+        gcol = "#dc2626" if g < 0 else "#0f172a"
+        led = _q("PROP:" + (r["property_name"] or ""))
+        body += (f"<tr><td class='mono' style='font-size:12px'>"
+                 f"<a href='/invoices?ledger={led}&edit_id={r['invoice_id']}&show_pdf=1' target='_blank' "
+                 f"style='color:#2563eb;font-weight:700;text-decoration:none' title='Open this invoice in a new tab'>{r['seq_no'] or ''}</a></td>"
+                 f"<td style='font-weight:700'>{r['supplier_name'] or ''}</td>"
+                 f"<td style='font-size:12px'>{r['property_name'] or ''}</td>"
+                 f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or ''}</td>"
+                 f"<td class='mono' style='font-size:12px'>{fmt_uk_date(r['invoice_date'])}</td>"
+                 f"<td class='mono' style='font-size:12px'>{fmt_uk_date(r['due_date'])}</td>"
+                 f"<td class='mono' style='text-align:right;color:{gcol}'>£{g:,.2f}</td>"
+                 f"<td class='mono' style='text-align:right'>£{(r['vat_amount'] or 0):,.2f}</td>"
+                 f"<td class='mono' style='text-align:right'>£{(r['net_amount'] or 0):,.2f}</td></tr>")
+    if grouped and cur is not None:
+        body += subtot(cur, prop_tot.get(cur, [0, 0, 0]))
+    if not rows and not agg_by:
+        body = "<tr><td colspan='9' style='text-align:center;padding:24px;color:#94a3b8'>Choose your criteria and press <b>Run report</b>.</td></tr>"
+    cap = (f"<div style='font-size:12px;color:#b45309;padding:4px 0'>Showing first 2,000 of {len(rows):,} rows — totals cover them all; use Excel export for the full list.</div>"
+           if len(rows) > 2000 else "")
+
+    if agg_by:
+        head = "Property" if agg_by == "property_name" else "Supplier"
+        abody = ""
+        for r in agg[:2000]:
+            g = r["g"] or 0
+            gcol = "#dc2626" if g < 0 else "#0f172a"
+            abody += (f"<tr><td style='font-weight:700'>{r['k'] or ''}</td>"
+                      f"<td class='mono' style='text-align:right;color:#94a3b8'>{r['c']}</td>"
+                      f"<td class='mono' style='text-align:right;color:{gcol}'>£{g:,.2f}</td>"
+                      f"<td class='mono' style='text-align:right'>£{(r['v'] or 0):,.2f}</td>"
+                      f"<td class='mono' style='text-align:right'>£{(r['n'] or 0):,.2f}</td></tr>")
+        if not agg:
+            abody = "<tr><td colspan='5' style='text-align:center;padding:24px;color:#94a3b8'>Choose your criteria and press <b>Run report</b>.</td></tr>"
+        results_table = (
+            "<div style='overflow-x:auto'><table class='tbl'>"
+            f"<thead><tr><th>{head}</th><th style='text-align:right'>Invoices</th>"
+            "<th style='text-align:right'>Amount</th><th style='text-align:right'>VAT</th>"
+            "<th style='text-align:right'>Net</th></tr></thead>"
+            f"<tbody>{abody}</tbody>"
+            "<tfoot><tr style='font-weight:800;border-top:2px solid #cbd5e1'>"
+            f"<td style='padding:8px'>Totals — {len(agg)} {head.lower()}(s)</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>{sum(r['c'] for r in agg):,}</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>£{tot_g:,.2f}</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>£{tot_v:,.2f}</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>£{tot_n:,.2f}</td></tr></tfoot>"
+            "</table></div>")
+        n_label = f"{len(agg)} {head.lower()}(s)"
+    else:
+        results_table = (
+            "<div style='overflow-x:auto'><table class='tbl'>"
+            "<thead><tr><th>Serial</th><th>Supplier</th><th>Property</th><th>Invoice No.</th>"
+            "<th>Inv. date</th><th>Due date</th>"
+            "<th style='text-align:right'>Amount</th><th style='text-align:right'>VAT</th>"
+            "<th style='text-align:right'>Net</th></tr></thead>"
+            f"<tbody>{body}</tbody>"
+            "<tfoot><tr style='font-weight:800;border-top:2px solid #cbd5e1'>"
+            f"<td colspan='6' style='padding:8px'>Totals — {len(rows):,} invoice(s)</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>£{tot_g:,.2f}</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>£{tot_v:,.2f}</td>"
+            f"<td class='mono' style='text-align:right;padding:8px'>£{tot_n:,.2f}</td></tr></tfoot>"
+            "</table></div>")
+        n_label = f"{len(rows):,} invoice(s)"
+
+    qs = urlencode({"report": report, "prop": prop, "supplier": supplier, "date_from": date_from,
+                    "date_to": date_to, "due_days": due_days, "sort": sort, "run": "1"})
+
+    content = f"""
+    <style>@media print {{ .noprint {{ display:none !important; }} .card {{ border:none !important; margin:0 !important; }} }}</style>
+    <div class='flex justify-between items-center noprint'>
+      <div class='text-2xl font-black text-slate-800'>🏠 Property Reports</div>
+      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+    </div>
+    <form method='GET' action='/invoices/property-reports' class='card noprint' style='margin-top:12px'>
+      <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'>
+        <div><label>Report</label><select name='report' id='rep' onchange='repFields()'>{rep_opts}</select></div>
+        <div><label>Property</label><select name='prop'>{prop_opts}</select></div>
+        <div data-f='supplier'><label>Supplier</label>
+          <input name='supplier' value="{html.escape(supplier)}" list='psupplierlist' autocomplete='off' placeholder='(all suppliers)'>{supplier_datalist}</div>
+        <div data-f='dates'><label>Date from</label><input type='date' name='date_from' value='{date_from}'></div>
+        <div data-f='dates'><label>Date to</label><input type='date' name='date_to' value='{date_to}'></div>
+        <div data-f='due'><label>Show due within (days)</label><input type='number' name='due_days' value='{due_days}' min='0' placeholder='0 = overdue only'></div>
+        <div><label>Sort by</label><select name='sort'>
+          <option value='property' {'selected' if sort == 'property' else ''}>Property</option>
+          <option value='supplier' {'selected' if sort == 'supplier' else ''}>Supplier</option>
+          <option value='invdate' {'selected' if sort == 'invdate' else ''}>Invoice date</option>
+          <option value='duedate' {'selected' if sort == 'duedate' else ''}>Due date</option>
+          <option value='amount' {'selected' if sort == 'amount' else ''}>Amount</option></select></div>
+      </div>
+      <div class='flex gap-3 mt-3 items-center'>
+        <button type='submit' name='run' value='1' class='btn-primary'>▶ Run report</button>
+      </div>
+    </form>
+    <div class='card' style='margin-top:12px'>
+      <div class='flex justify-between items-center mb-3'>
+        <div class='text-sm font-bold text-slate-600'>{labels[report]} — {n_label}</div>
+        <div class='flex gap-2 noprint'>
+          <a href='/invoices/property-reports?{qs}&export=csv' class='btn-secondary' style='font-size:12px'>⬇️ Excel (CSV)</a>
+          <button type='button' onclick='window.print()' class='btn-secondary' style='font-size:12px'>🖨️ Print / PDF</button>
+        </div>
+      </div>
+      {cap}
+      {results_table}
+    </div>
+    """ + """
+    <script>
+    function repFields() {
+      var r = document.getElementById('rep').value;
+      var m = {all:['supplier','dates'], overdue:['due','dates'], spend:['dates'], supplier:['dates']};
+      var use = m[r] || [];
+      document.querySelectorAll('[data-f]').forEach(function(el){
+        var on = use.indexOf(el.getAttribute('data-f')) > -1;
+        el.style.opacity = on ? '1' : '0.45';
+        el.querySelectorAll('input,select').forEach(function(i){ i.disabled = !on; });
+      });
+    }
+    document.addEventListener('DOMContentLoaded', repFields);
+    </script>
+    """
+    return page("Property Reports", content, user, "invoices")
 
 
 @router.get("/invoices/supplier-terms", response_class=HTMLResponse)
