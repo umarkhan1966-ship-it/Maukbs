@@ -1356,7 +1356,47 @@ def invoices_page(
           {_rows}
         </div>"""
 
-    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, notes_html, list_html, js, terms_js])
+    # ── Additional documents (edit mode): extra whole files per invoice (demand
+    #    note, supporting emails…). Anyone logged in can add; only owner/manager
+    #    can remove. The primary invoice scan stays in the form above (pdf_path). ──
+    attachments_html = ""
+    if is_edit:
+        _asrc = "property" if is_prop else "supplier"
+        _atts = q("""SELECT att_id, orig_name, label, uploaded_by FROM invoice_attachments
+                     WHERE source=? AND invoice_id=? ORDER BY uploaded_at, att_id""",
+                  (_asrc, edit_id), fetch=True) or []
+        _can_del = user.get("role") in ("owner", "manager")
+        _led = html.escape(str(ledger), quote=True)
+        _alist = ""
+        for a in _atts:
+            _lbl = f" <span style='color:#64748b;font-size:12px'>— {html.escape(str(a['label']))}</span>" if a['label'] else ""
+            _del = ""
+            if _can_del:
+                _del = (f"<form method='POST' action='/invoices/attachment/{a['att_id']}/delete' style='display:inline'"
+                        f" onsubmit=\"return confirm('Remove this document?');\">"
+                        f"<input type='hidden' name='ledger' value='{_led}'>"
+                        f"<input type='hidden' name='invoice_id' value='{edit_id}'>"
+                        f"<button type='submit' class='btn-secondary' style='font-size:11px;color:#dc2626'>🗑 Remove</button></form>")
+            _alist += (f"<div style='display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #f1f5f9'>"
+                       f"<a href='/invoices/attachment/{a['att_id']}' target='_blank' style='color:#2563eb;font-weight:600;text-decoration:none'>📄 {html.escape(str(a['orig_name'] or 'document'))}</a>{_lbl}"
+                       f"<span style='font-size:11px;color:#94a3b8;margin-left:auto'>{html.escape(str(a['uploaded_by'] or ''))}</span>{_del}</div>")
+        if not _atts:
+            _alist = "<div style='font-size:13px;color:#94a3b8;padding:4px 0'>No additional documents yet.</div>"
+        attachments_html = f"""
+        <div class='card' id='attachments'>
+          <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-2'>📎 Additional documents</div>
+          <div style='font-size:11px;color:#94a3b8;margin-bottom:10px'>Attach the demand note, supporting emails, or any other files for this invoice — the main invoice PDF is managed in the form above. Only the owner can remove documents.</div>
+          {_alist}
+          <form method='POST' action='/invoices/attachment/add' enctype='multipart/form-data' style='margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
+            <input type='hidden' name='ledger' value='{_led}'>
+            <input type='hidden' name='invoice_id' value='{edit_id}'>
+            <input type='file' name='attach_files' multiple required style='font-size:13px'>
+            <input type='text' name='label' placeholder='label (optional, e.g. Demand note)' maxlength='60' style='font-size:13px;padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px'>
+            <button type='submit' class='btn-secondary' style='font-size:13px'>➕ Attach file(s)</button>
+          </form>
+        </div>"""
+
+    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, attachments_html, notes_html, list_html, js, terms_js])
     return page("Invoices", content, user, "invoices")
 
 
@@ -1685,6 +1725,17 @@ def delete_invoice(
                 os.remove(old[0]["pdf_path"])
         except OSError:
             pass  # file already gone / locked — not worth failing the delete over
+    # Also remove any additional attachments (files + rows) for this invoice.
+    _src = "property" if is_property_ledger(ledger) else "supplier"
+    for a in (q("SELECT file_path FROM invoice_attachments WHERE source=? AND invoice_id=?",
+                (_src, invoice_id), fetch=True) or []):
+        if a["file_path"]:
+            try:
+                if os.path.exists(a["file_path"]):
+                    os.remove(a["file_path"])
+            except OSError:
+                pass
+    q("DELETE FROM invoice_attachments WHERE source=? AND invoice_id=?", (_src, invoice_id))
     from urllib.parse import quote as urlquote
     return RedirectResponse(
         f"/invoices?ledger={ledger}&msg={urlquote('Invoice deleted')}&msg_type=success",
@@ -1738,6 +1789,80 @@ def serve_pdf_thumb(
         return Response(thumb.getvalue(), media_type="image/png")
     except Exception:
         return Response(status_code=404)
+
+
+@router.post("/invoices/attachment/add")
+async def attachment_add(request: Request, session: str | None = Cookie(default=None)):
+    """Attach one or more ADDITIONAL documents to a saved invoice (demand note,
+    supporting emails, etc.). Any logged-in user may add; only owner/manager can
+    remove (see attachment_delete). The main invoice PDF is unchanged (pdf_path)."""
+    redir, user = require_login(session)
+    if redir: return redir
+    from urllib.parse import quote as urlquote
+    form   = await request.form()
+    ledger = str(form.get("ledger", "Uxbridge"))
+    try:    invoice_id = int(form.get("invoice_id") or 0)
+    except (TypeError, ValueError): invoice_id = 0
+    label  = (str(form.get("label", "")) or "").strip()
+    source = "property" if is_property_ledger(ledger) else "supplier"
+    if not invoice_id:
+        return RedirectResponse(f"/invoices?ledger={ledger}&msg=Save+the+invoice+first,+then+add+documents&msg_type=error",
+                                status_code=303)
+    files = [f for f in form.getlist("attach_files") if hasattr(f, "filename") and f.filename]
+    if not files:
+        return RedirectResponse(f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg=No+file+chosen&msg_type=error#attachments",
+                                status_code=303)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    saved = 0
+    for f in files:
+        ext  = os.path.splitext(f.filename)[1].lower()
+        fn   = f"{uuid.uuid4().hex}{ext}"
+        full = os.path.join(UPLOAD_DIR, fn)
+        with open(full, "wb") as out:
+            out.write(await f.read())
+        q("""INSERT INTO invoice_attachments (source, invoice_id, file_path, orig_name, label, uploaded_by)
+             VALUES (?,?,?,?,?,?)""",
+          (source, invoice_id, full, f.filename, label or None, user.get("username", "")))
+        saved += 1
+    return RedirectResponse(f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg={urlquote(f'{saved} document(s) attached')}#attachments",
+                            status_code=303)
+
+
+@router.get("/invoices/attachment/{att_id}")
+def attachment_serve(att_id: int, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    rows = q("SELECT file_path FROM invoice_attachments WHERE att_id=?", (att_id,), fetch=True)
+    if not rows or not rows[0]["file_path"] or not os.path.exists(rows[0]["file_path"]):
+        return HTMLResponse("<p>Attachment not found</p>", status_code=404)
+    path = rows[0]["file_path"]
+    ext  = os.path.splitext(path)[1].lower()
+    mt   = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "application/octet-stream")
+    return FileResponse(path, media_type=mt)
+
+
+@router.post("/invoices/attachment/{att_id}/delete")
+def attachment_delete(att_id: int, ledger: str = Form("Uxbridge"),
+                      invoice_id: int = Form(0), session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    from urllib.parse import quote as urlquote
+    if user.get("role") not in ("owner", "manager"):
+        return RedirectResponse(
+            f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg=Only+the+owner+can+remove+documents&msg_type=error#attachments",
+            status_code=303)
+    rows = q("SELECT file_path FROM invoice_attachments WHERE att_id=?", (att_id,), fetch=True)
+    q("DELETE FROM invoice_attachments WHERE att_id=?", (att_id,))
+    if rows and rows[0]["file_path"]:
+        try:
+            if os.path.exists(rows[0]["file_path"]):
+                os.remove(rows[0]["file_path"])
+        except OSError:
+            pass
+    return RedirectResponse(
+        f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg={urlquote('Document removed')}#attachments",
+        status_code=303)
 
 
 @router.post("/invoices/extract-pdf")
