@@ -2400,18 +2400,20 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
             </table>
           </div>
         </div>"""
-        # One combined PDF per store/property in this batch (separate companies →
-        # separate files), each in invoice-date order.
+        # A combined PDF per STORE (separate companies), plus ONE for ALL
+        # properties (done together), each in invoice-date order.
         from urllib.parse import quote as _q
-        _locs = q("""SELECT DISTINCT loc FROM (
-                       SELECT store_name loc FROM supplier_invoices WHERE accountant_sent_date=?
-                       UNION SELECT property_name FROM property_invoices WHERE accountant_sent_date=?
-                     ) WHERE loc IS NOT NULL AND loc<>'' ORDER BY loc""",
-                  (sent_date, sent_date), fetch=True) or []
+        _stores = q("""SELECT DISTINCT store_name s FROM supplier_invoices
+                       WHERE accountant_sent_date=? AND store_name IS NOT NULL AND store_name<>''
+                       ORDER BY store_name""", (sent_date,), fetch=True) or []
+        _hasprop = q("SELECT 1 FROM property_invoices WHERE accountant_sent_date=? LIMIT 1",
+                     (sent_date,), fetch=True)
         _dl = "".join(
-            f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(l['loc'])}' "
-            f"class='btn-primary' style='font-size:12px'>⬇️ {l['loc']} PDF</a>"
-            for l in _locs)
+            f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(s['s'])}' "
+            f"class='btn-primary' style='font-size:12px'>⬇️ {s['s']} PDF</a>" for s in _stores)
+        if _hasprop:
+            _dl += (f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc=Properties' "
+                    f"class='btn-primary' style='font-size:12px'>⬇️ Properties PDF</a>")
         head_extra = _dl + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
     else:
         batches = q("""
@@ -2468,16 +2470,22 @@ def combined_pdf(sent_date: str = "", loc: str = "", session: str | None = Cooki
     if not sent_date:
         return HTMLResponse("<p>No batch date given.</p>", status_code=400)
 
-    # Invoices in this batch for the chosen store/property (loc), in DATE order —
-    # each store/property trades as its own company, so it gets its own file.
-    rows = q("""SELECT pdf_path FROM (
-                  SELECT store_name loc, invoice_date, seq_no, pdf_path
-                    FROM supplier_invoices WHERE accountant_sent_date=?
-                  UNION ALL
-                  SELECT property_name loc, invoice_date, seq_no, pdf_path
-                    FROM property_invoices WHERE accountant_sent_date=?
-                ) WHERE (?='' OR loc=?) ORDER BY invoice_date, seq_no""",
-             (sent_date, sent_date, loc, loc), fetch=True) or []
+    # This batch, scoped to the chosen company, in invoice-DATE order. Each store
+    # is its own file; ALL properties combine into one "Properties" file.
+    if loc == "Properties":
+        rows = q("""SELECT pdf_path FROM property_invoices
+                    WHERE accountant_sent_date=? ORDER BY invoice_date, seq_no""",
+                 (sent_date,), fetch=True) or []
+    elif loc:
+        rows = q("""SELECT pdf_path FROM supplier_invoices
+                    WHERE accountant_sent_date=? AND store_name=? ORDER BY invoice_date, seq_no""",
+                 (sent_date, loc), fetch=True) or []
+    else:
+        rows = q("""SELECT pdf_path FROM (
+                      SELECT invoice_date, seq_no, pdf_path FROM supplier_invoices WHERE accountant_sent_date=?
+                      UNION ALL
+                      SELECT invoice_date, seq_no, pdf_path FROM property_invoices WHERE accountant_sent_date=?
+                    ) ORDER BY invoice_date, seq_no""", (sent_date, sent_date), fetch=True) or []
     paths = [r["pdf_path"] for r in rows if r["pdf_path"]]
 
     MAXN = 400
