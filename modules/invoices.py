@@ -1267,7 +1267,9 @@ def invoices_page(
         style='border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;font-weight:600;max-width:260px'>
         {ledger_opts}
       </select>
-      <a href='/invoices/recent-payments' class='btn-secondary' style='margin-left:auto'>📋 Recent Payments</a>
+    </div>
+    <div class='flex flex-wrap gap-2 items-center justify-end' style='margin-top:8px'>
+      <a href='/invoices/recent-payments' class='btn-secondary'>📋 Recent Payments</a>
       {"<a href='/invoices/dd-collection' class='btn-secondary'>🏦 DD Collection Check</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send to Accountant</a>" if user.get('role') == 'owner' else ''}
       {"<a href='/invoices/reports' class='btn-secondary'>📊 Reports</a>" if user.get('role') == 'owner' else ''}
