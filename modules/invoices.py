@@ -1385,13 +1385,13 @@ def invoices_page(
         attachments_html = f"""
         <div class='card' id='attachments'>
           <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-2'>📎 Additional documents</div>
-          <div style='font-size:11px;color:#94a3b8;margin-bottom:10px'>Attach the demand note, supporting emails, or any other files for this invoice — the main invoice PDF is managed in the form above. Only the owner can remove documents.</div>
+          <div style='font-size:11px;color:#94a3b8;margin-bottom:10px'>Attach the demand note, supporting emails, or any other files for this invoice — the main invoice PDF is managed in the form above. Give each upload a short <b>label</b> so it's easy to identify later. Only the owner can remove documents.</div>
           {_alist}
           <form method='POST' action='/invoices/attachment/add' enctype='multipart/form-data' style='margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
             <input type='hidden' name='ledger' value='{_led}'>
             <input type='hidden' name='invoice_id' value='{edit_id}'>
             <input type='file' name='attach_files' multiple required style='font-size:13px'>
-            <input type='text' name='label' placeholder='label (optional, e.g. Demand note)' maxlength='60' style='font-size:13px;padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px'>
+            <input type='text' name='label' required placeholder='label (required, e.g. Demand note)' maxlength='60' style='font-size:13px;padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px'>
             <button type='submit' class='btn-secondary' style='font-size:13px'>➕ Attach file(s)</button>
           </form>
         </div>"""
@@ -1811,6 +1811,9 @@ async def attachment_add(request: Request, session: str | None = Cookie(default=
     files = [f for f in form.getlist("attach_files") if hasattr(f, "filename") and f.filename]
     if not files:
         return RedirectResponse(f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg=No+file+chosen&msg_type=error#attachments",
+                                status_code=303)
+    if not label:
+        return RedirectResponse(f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg={urlquote('Please add a short label describing the document(s).')}&msg_type=error#attachments",
                                 status_code=303)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     saved = 0
