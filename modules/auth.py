@@ -69,15 +69,15 @@ def login_page(error: str = ""):
     </div>
     <div style="background:white;border-radius:20px;padding:32px;border:1px solid #e2e8f0;box-shadow:0 4px 24px rgba(0,0,0,.06)">
       {err_html}
-      <form action="/login" method="POST" class="space-y-4 {'mt-4' if error else ''}">
+      <form action="/login" method="POST" autocomplete="off" class="space-y-4 {'mt-4' if error else ''}">
         <div>
           <label style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px">Username</label>
-          <input name="username" type="text" required autofocus
+          <input name="username" type="text" required autofocus autocomplete="off"
             style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;font-size:15px;outline:none;font-family:'DM Sans',sans-serif;">
         </div>
         <div>
           <label style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px">Password</label>
-          <input name="password" type="password" required
+          <input name="password" type="password" required autocomplete="off"
             style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;font-size:15px;outline:none;font-family:'DM Sans',sans-serif;">
         </div>
         <button type="submit"
