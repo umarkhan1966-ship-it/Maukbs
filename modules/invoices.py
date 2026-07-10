@@ -593,7 +593,7 @@ def invoices_page(
             o_html = ""
             for ov, ol in opts:
                 sel = "selected" if str(safe_val) == str(ov) else ""
-                o_html += f"<option value='{ov}' {sel}>{ol}</option>"
+                o_html += f"<option value='{html.escape(str(ov), quote=True)}' {sel}>{html.escape(str(ol))}</option>"
             dis = "disabled" if lock else ""
             return f"<div><label>{label}{mark}</label><select name='{name}' {req_attr} {dis} {style_attr}>{o_html}</select></div>"
         list_attr = f"list='{dlist}' autocomplete='off'" if dlist else ""
@@ -812,7 +812,7 @@ def invoices_page(
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(180px,1fr))'>
           {freed_html}
           {seq_field}
-          {fi('supplier_name',  'Supplier Name',    val=inv.get('supplier_name',''),  req=True, dlist='supplierlist')}{supplier_datalist}
+          {(fi('supplier_name', 'Supplier Name', val=inv.get('supplier_name',''), req=True, opts=[('', '— select a supplier —')] + [(r['s'], r['s']) for r in _sup_rows]) if user.get('role') == 'staff' else fi('supplier_name', 'Supplier Name', val=inv.get('supplier_name',''), req=True, dlist='supplierlist') + supplier_datalist)}
           {fi('invoice_number', 'Invoice Number',   val=inv.get('invoice_number',''), hi=True)}
           {demand_field}
           {fi('invoice_date',   'Invoice Date',     'date', inv.get('invoice_date',''), hi=True)}
@@ -1303,6 +1303,22 @@ def invoices_page(
         if(sup){{ sup.addEventListener('change',applyTerms); sup.addEventListener('blur',applyTerms); }}
         if(idate) idate.addEventListener('change',applyTerms);
         applyTerms();
+        // Owner/manager only: gently confirm before adding a brand-new supplier
+        // name (staff use a fixed dropdown, so this is skipped for them).
+        var dl = document.getElementById('supplierlist');
+        if (sup && dl && sup.tagName !== 'SELECT') {{
+          var f = sup.form;
+          var known = new Set(Array.from(dl.options).map(function(o){{ return o.value.trim().toLowerCase(); }}));
+          if (f) f.addEventListener('submit', function(e) {{
+            var v = (sup.value||'').trim();
+            if (v && !known.has(v.toLowerCase()) && !f.dataset.newsupok) {{
+              e.preventDefault();
+              if (confirm('"'+v+'" is not in your supplier list yet.\\n\\nThis may be a new supplier, or a typo/duplicate of one you already have.\\n\\nOK = add it as a NEW supplier.\\nCancel = go back and pick an existing one.')) {{
+                f.dataset.newsupok = '1'; f.submit();
+              }}
+            }}
+          }});
+        }}
       }});
     }})();
     </script>"""
@@ -1488,6 +1504,19 @@ async def save_invoice(
         approval_status = "pending" if fv("save_pending") else "approved"
     else:
         approval_status = "pending"
+
+    # ── Staff can only file against an EXISTING supplier (they pick from a fixed
+    #    dropdown). Enforce it server-side too, so the tidy supplier list can't be
+    #    bypassed. Owner/manager instead get a soft client-side confirm. ──
+    if role == "staff":
+        _known = q("""SELECT 1 FROM (SELECT supplier_name FROM supplier_invoices
+                        UNION SELECT supplier_name FROM property_invoices)
+                      WHERE supplier_name=? LIMIT 1""", (supplier,), fetch=True)
+        if not _known:
+            return RedirectResponse(
+                f"/invoices?ledger={ledger}&msg="
+                + urlquote("Please pick a supplier from the list — new suppliers are added by the owner.")
+                + "&msg_type=error", status_code=303)
 
     # ── Duplicate check (supplier + invoice_number + store, warn only) ──
     force = fv("force_save")
