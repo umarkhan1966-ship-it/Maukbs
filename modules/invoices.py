@@ -2410,11 +2410,13 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
                      (sent_date,), fetch=True)
         _dl = "".join(
             f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(s['s'])}' "
-            f"class='btn-primary' style='font-size:12px'>⬇️ {s['s']} PDF</a>" for s in _stores)
+            f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ {s['s']} PDF</a>" for s in _stores)
         if _hasprop:
             _dl += (f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc=Properties' "
-                    f"class='btn-primary' style='font-size:12px'>⬇️ Properties PDF</a>")
-        head_extra = _dl + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
+                    f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ Properties PDF</a>")
+        _cmp = ("<label style='font-size:12px;color:#475569;display:flex;align-items:center;gap:4px'>"
+                "<input type='checkbox' id='cmp'> 🗜️ Smaller file (for email)</label>")
+        head_extra = _cmp + _dl + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
     else:
         batches = q("""
             SELECT d, SUM(n) n, SUM(t) t FROM (
@@ -2453,12 +2455,22 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
         <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
       </div>
     </div>
-    {body}"""
+    {body}
+    <script>
+    (function(){{
+      var cb=document.getElementById('cmp'); if(!cb) return;
+      var btns=document.querySelectorAll('.dlbtn');
+      btns.forEach(function(b){{ b.dataset.base=b.getAttribute('href'); }});
+      cb.addEventListener('change', function(){{
+        btns.forEach(function(b){{ b.setAttribute('href', b.dataset.base + (cb.checked?'&compress=1':'')); }});
+      }});
+    }})();
+    </script>"""
     return page("Sent to Accountant — history", content, user, "invoices")
 
 
 @router.get("/invoices/combined-pdf")
-def combined_pdf(sent_date: str = "", loc: str = "", session: str | None = Cookie(default=None)):
+def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session: str | None = Cookie(default=None)):
     """Owner-only: merge every attached invoice PDF in one accountant batch (a
     given accountant_sent_date, retail + property) into a single PDF to email —
     replaces the manual chore of combining 30-80 files by hand. Image scans are
@@ -2496,34 +2508,77 @@ def combined_pdf(sent_date: str = "", loc: str = "", session: str | None = Cooki
         return HTMLResponse("<p>No invoice PDFs are attached in this batch, so there's nothing to "
                             "combine. Attach the invoice scans first.</p>", status_code=404)
 
+    _img_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")
+
+    # Always build the clean lossless merge first.
     from pypdf import PdfWriter, PdfReader
-    writer, skipped = PdfWriter(), 0
+    writer = PdfWriter()
     for p in paths:
         if not os.path.exists(p):
-            skipped += 1; continue
+            continue
         ext = os.path.splitext(p)[1].lower()
         try:
             if ext == ".pdf":
                 for pg in PdfReader(p).pages:
                     writer.add_page(pg)
-            elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"):
+            elif ext in _img_exts:
                 from PIL import Image
                 buf = io.BytesIO()
                 Image.open(p).convert("RGB").save(buf, "PDF")
                 buf.seek(0)
                 for pg in PdfReader(buf).pages:
                     writer.add_page(pg)
-            else:
-                skipped += 1
         except Exception:
-            skipped += 1
-
+            continue
     if len(writer.pages) == 0:
         return HTMLResponse("<p>Could not read any of the attached documents in this batch.</p>", status_code=404)
-    out = io.BytesIO(); writer.write(out)
+    lb = io.BytesIO(); writer.write(lb)
+    data, sfx = lb.getvalue(), ""
+
+    if compress == "1":
+        # Also build a rasterised/JPEG version, but use it ONLY if it's actually
+        # smaller — for already-small/text PDFs, rasterising can be bigger, so we
+        # never hand back something larger than the clean merge.
+        try:
+            from PIL import Image
+            import pypdfium2 as pdfium
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.utils import ImageReader
+            DPI = 144.0
+            def _jpeg_bytes(pil):
+                pil = pil.convert("RGB"); pil.thumbnail((2000, 2000))
+                b = io.BytesIO(); pil.save(b, "JPEG", quality=55, optimize=True)
+                return b.getvalue()
+            jpegs = []
+            for p in paths:
+                if not os.path.exists(p):
+                    continue
+                ext = os.path.splitext(p)[1].lower()
+                try:
+                    if ext == ".pdf":
+                        doc = pdfium.PdfDocument(p)
+                        for i in range(len(doc)):
+                            jpegs.append(_jpeg_bytes(doc[i].render(scale=2.0).to_pil()))
+                        doc.close()
+                    elif ext in _img_exts:
+                        jpegs.append(_jpeg_bytes(Image.open(p)))
+                except Exception:
+                    continue
+            if jpegs:
+                cbuf = io.BytesIO(); cv = canvas.Canvas(cbuf)
+                for jb in jpegs:
+                    ir = ImageReader(io.BytesIO(jb)); iw, ih = ir.getSize()
+                    pw, ph = iw * 72.0 / DPI, ih * 72.0 / DPI
+                    cv.setPageSize((pw, ph)); cv.drawImage(ir, 0, 0, width=pw, height=ph); cv.showPage()
+                cv.save(); cdata = cbuf.getvalue()
+                if cdata and len(cdata) < len(data):
+                    data, sfx = cdata, "_compressed"
+        except Exception:
+            pass  # any failure → keep the clean lossless version
+
     _locpart = (loc.replace(' ', '_').replace('/', '-') + "_") if loc else ""
-    fn = f"Accountant_{_locpart}{sent_date}.pdf"
-    return Response(out.getvalue(), media_type="application/pdf",
+    fn = f"Accountant_{_locpart}{sent_date}{sfx}.pdf"
+    return Response(data, media_type="application/pdf",
                     headers={"Content-Disposition": f"attachment; filename={fn}"})
 
 
