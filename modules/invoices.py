@@ -2400,7 +2400,8 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
             </table>
           </div>
         </div>"""
-        head_extra = (f"<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>")
+        head_extra = (f"<a href='/invoices/combined-pdf?sent_date={sent_date}' class='btn-primary'>⬇️ Download combined PDF</a>"
+                      f"<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>")
     else:
         batches = q("""
             SELECT d, SUM(n) n, SUM(t) t FROM (
@@ -2441,6 +2442,67 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
     </div>
     {body}"""
     return page("Sent to Accountant — history", content, user, "invoices")
+
+
+@router.get("/invoices/combined-pdf")
+def combined_pdf(sent_date: str = "", session: str | None = Cookie(default=None)):
+    """Owner-only: merge every attached invoice PDF in one accountant batch (a
+    given accountant_sent_date, retail + property) into a single PDF to email —
+    replaces the manual chore of combining 30-80 files by hand. Image scans are
+    converted to PDF pages; unreadable/missing files are skipped."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+    if not sent_date:
+        return HTMLResponse("<p>No batch date given.</p>", status_code=400)
+
+    rows = q("""SELECT loc, supplier_name, seq_no, pdf_path FROM (
+                  SELECT store_name loc, supplier_name, seq_no, pdf_path
+                    FROM supplier_invoices WHERE accountant_sent_date=?
+                  UNION ALL
+                  SELECT property_name, supplier_name, seq_no, pdf_path
+                    FROM property_invoices WHERE accountant_sent_date=?
+                ) ORDER BY loc, supplier_name, seq_no""",
+             (sent_date, sent_date), fetch=True) or []
+    paths = [r["pdf_path"] for r in rows if r["pdf_path"]]
+
+    MAXN = 400
+    if len(paths) > MAXN:
+        return HTMLResponse(f"<p>This batch has {len(paths)} attached documents — too many to combine "
+                            f"into one file. Please split it into smaller batches.</p>", status_code=400)
+    if not paths:
+        return HTMLResponse("<p>No invoice PDFs are attached in this batch, so there's nothing to "
+                            "combine. Attach the invoice scans first.</p>", status_code=404)
+
+    from pypdf import PdfWriter, PdfReader
+    writer, skipped = PdfWriter(), 0
+    for p in paths:
+        if not os.path.exists(p):
+            skipped += 1; continue
+        ext = os.path.splitext(p)[1].lower()
+        try:
+            if ext == ".pdf":
+                for pg in PdfReader(p).pages:
+                    writer.add_page(pg)
+            elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"):
+                from PIL import Image
+                buf = io.BytesIO()
+                Image.open(p).convert("RGB").save(buf, "PDF")
+                buf.seek(0)
+                for pg in PdfReader(buf).pages:
+                    writer.add_page(pg)
+            else:
+                skipped += 1
+        except Exception:
+            skipped += 1
+
+    if len(writer.pages) == 0:
+        return HTMLResponse("<p>Could not read any of the attached documents in this batch.</p>", status_code=404)
+    out = io.BytesIO(); writer.write(out)
+    fn = f"Accountant_batch_{sent_date}.pdf"
+    return Response(out.getvalue(), media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename={fn}"})
 
 
 @router.get("/invoices/reports", response_class=HTMLResponse)

@@ -12,6 +12,8 @@ python-docx==1.2.0             # staff contract / offer-letter generation
 reportlab==4.5.1               # rota PDF export, manager's reports
 pdfplumber==0.11.10           # invoice PDF text extraction (/invoices/extract-pdf)
 Pillow>=12.2.0                 # invoice PDF thumbnails (pdfplumber 0.11.10 needs >=12.2)
+pypdfium2>=4                   # render PDF page -> thumbnail (serve_pdf_thumb)
+pypdf>=4,<6                    # combine a batch's invoice PDFs for the accountant
 
 # --- Data / utilities ---
 haversine==2.9.0               # GPS geofencing for mobile clock-in
