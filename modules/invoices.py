@@ -2345,7 +2345,8 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
 
 
 @router.get("/invoices/accountant-sent", response_class=HTMLResponse)
-def accountant_sent(session: str | None = Cookie(default=None), sent_date: str = ""):
+def accountant_sent(session: str | None = Cookie(default=None), sent_date: str = "",
+                    msg: str = "", msg_type: str = "success"):
     """Owner-only report of what HAS been sent to the accountant, grouped by the
     date sent. Pick a date to see every invoice in that batch."""
     redir, user = require_login(session)
@@ -2416,7 +2417,13 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
                     f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ Properties PDF</a>")
         _cmp = ("<label style='font-size:12px;color:#475569;display:flex;align-items:center;gap:4px'>"
                 "<input type='checkbox' id='cmp'> 🗜️ Smaller file (for email)</label>")
-        head_extra = _cmp + _dl + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
+        _unsend = ("<form method='POST' action='/invoices/accountant-unsend' style='display:inline' "
+                   "onsubmit=\"return confirm('Un-mark ALL invoices in this batch as sent? They go back to "
+                   "not-yet-sent. Nothing else changes.');\">"
+                   f"<input type='hidden' name='sent_date' value='{sent_date}'>"
+                   "<button type='submit' class='btn-secondary' style='font-size:12px;color:#dc2626'>"
+                   "↩ Un-mark this batch as sent</button></form>")
+        head_extra = _cmp + _dl + _unsend + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
     else:
         batches = q("""
             SELECT d, SUM(n) n, SUM(t) t FROM (
@@ -2446,7 +2453,11 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
         <div style='color:#94a3b8;font-size:12px;margin-top:6px'>Click a date to see the invoices in that batch.</div>"""
         head_extra = ""
 
+    _flash = ""
+    if msg:
+        _flash = f"<div class='flash-{'success' if msg_type == 'success' else 'error'}'>{html.escape(msg)}</div>"
     content = f"""
+    {_flash}
     <div class='flex justify-between items-center'>
       <div class='text-2xl font-black text-slate-800'>📋 Sent to Accountant — history</div>
       <div class='flex gap-2'>
@@ -2467,6 +2478,31 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
     }})();
     </script>"""
     return page("Sent to Accountant — history", content, user, "invoices")
+
+
+@router.post("/invoices/accountant-unsend")
+def accountant_unsend(sent_date: str = Form(""), session: str | None = Cookie(default=None)):
+    """Owner-only: clear the 'sent to accountant' date for every invoice in a
+    batch, putting them back to 'not yet sent' — e.g. after a test run, or to fix
+    a mis-marked batch. Non-destructive: only the sent flag is cleared."""
+    redir, user = require_login(session)
+    if redir: return redir
+    from urllib.parse import quote as urlquote
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+    if not sent_date:
+        return RedirectResponse("/invoices/accountant-sent", status_code=303)
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    who = user.get("username", "")
+    n = 0
+    for tbl in ("supplier_invoices", "property_invoices"):
+        cnt = q(f"SELECT COUNT(*) c FROM {tbl} WHERE accountant_sent_date=?", (sent_date,), fetch=True)
+        n += (cnt[0]["c"] if cnt else 0)
+        q(f"UPDATE {tbl} SET accountant_sent_date=NULL, updated_by=?, updated_at=? WHERE accountant_sent_date=?",
+          (who, now_ts, sent_date))
+    return RedirectResponse(
+        f"/invoices/accountant-sent?msg={urlquote(f'Un-marked {n} invoice(s) — back to not-yet-sent.')}&msg_type=success",
+        status_code=303)
 
 
 @router.get("/invoices/combined-pdf")
