@@ -2485,20 +2485,34 @@ def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session
     # This batch, scoped to the chosen company, in invoice-DATE order. Each store
     # is its own file; ALL properties combine into one "Properties" file.
     if loc == "Properties":
-        rows = q("""SELECT pdf_path FROM property_invoices
+        rows = q("""SELECT invoice_date, pdf_path FROM property_invoices
                     WHERE accountant_sent_date=? ORDER BY invoice_date, seq_no""",
                  (sent_date,), fetch=True) or []
     elif loc:
-        rows = q("""SELECT pdf_path FROM supplier_invoices
+        rows = q("""SELECT invoice_date, pdf_path FROM supplier_invoices
                     WHERE accountant_sent_date=? AND store_name=? ORDER BY invoice_date, seq_no""",
                  (sent_date, loc), fetch=True) or []
     else:
-        rows = q("""SELECT pdf_path FROM (
+        rows = q("""SELECT invoice_date, pdf_path FROM (
                       SELECT invoice_date, seq_no, pdf_path FROM supplier_invoices WHERE accountant_sent_date=?
                       UNION ALL
                       SELECT invoice_date, seq_no, pdf_path FROM property_invoices WHERE accountant_sent_date=?
                     ) ORDER BY invoice_date, seq_no""", (sent_date, sent_date), fetch=True) or []
     paths = [r["pdf_path"] for r in rows if r["pdf_path"]]
+
+    # Invoice-period label for the filename: a single month (Jun2026) or a range
+    # (May2026-Jun2026) when the batch spans months (late "filed at start of…" ones).
+    def _mlabel(d):
+        try:
+            return datetime.strptime(str(d)[:7], "%Y-%m").strftime("%b%Y")
+        except Exception:
+            return ""
+    _dts = [r["invoice_date"] for r in rows if r["invoice_date"]]
+    if _dts:
+        _lo, _hi = _mlabel(min(_dts)), _mlabel(max(_dts))
+        month_part = _lo if _lo == _hi else f"{_lo}-{_hi}"
+    else:
+        month_part = ""
 
     MAXN = 400
     if len(paths) > MAXN:
@@ -2576,8 +2590,9 @@ def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session
         except Exception:
             pass  # any failure → keep the clean lossless version
 
-    _locpart = (loc.replace(' ', '_').replace('/', '-') + "_") if loc else ""
-    fn = f"Accountant_{_locpart}{sent_date}{sfx}.pdf"
+    _locpart = loc.replace(' ', '_').replace('/', '-') if loc else "Batch"
+    _mpart = f"_{month_part}" if month_part else ""
+    fn = f"Accountant_{_locpart}{_mpart}_sent{sent_date}{sfx}.pdf"
     return Response(data, media_type="application/pdf",
                     headers={"Content-Disposition": f"attachment; filename={fn}"})
 
