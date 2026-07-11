@@ -1302,7 +1302,13 @@ def invoices_page(
         const idate=document.querySelector('[name="invoice_date"]');
         if(sup){{ sup.addEventListener('change',applyTerms); sup.addEventListener('blur',applyTerms); }}
         if(idate) idate.addEventListener('change',applyTerms);
-        applyTerms();
+        // Auto-fill the due date from the supplier's term ONLY on a NEW invoice,
+        // so opening a SAVED invoice never silently recomputes its stored due date.
+        // (Deliberately changing the supplier/date on an edit still recalculates,
+        // via the listeners above — that's a real change the owner is making.)
+        var _ef = document.getElementById('invoiceForm');
+        var _ea = (_ef && _ef.getAttribute('action')) || '';
+        if (_ea.indexOf('/save/0') !== -1) applyTerms();
         // Owner/manager only: gently confirm before adding a brand-new supplier
         // name (staff use a fixed dropdown, so this is skipped for them).
         var dl = document.getElementById('supplierlist');
