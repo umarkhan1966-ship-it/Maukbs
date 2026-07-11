@@ -2192,17 +2192,19 @@ def accountant_batch(session: str | None = Cookie(default=None),
         return RedirectResponse("/invoices?msg=Send+to+Accountant+is+owner-only&msg_type=error",
                                 status_code=303)
 
-    # Gather unsent invoices from whichever ledgers the scope covers. Each row
-    # carries its source table so the same invoice_id in both tables can't clash.
-    want_retail = scope in ("", "Uxbridge", "Newbury")
-    want_prop   = scope in ("", "Property")
+    # Only build the list once the owner has DELIBERATELY chosen a scope and hit
+    # Filter — landing on the page shows nothing, so nothing can be marked by
+    # accident. scope="" is the "— choose —" prompt; scope="ALL" = Everything.
+    filtered    = bool(scope)
+    want_retail = scope in ("ALL", "Uxbridge", "Newbury")
+    want_prop   = scope in ("ALL", "Property")
     date_conds, date_params = [], []
     if date_from: date_conds.append("invoice_date>=?"); date_params.append(date_from)
     if date_to:   date_conds.append("invoice_date<=?"); date_params.append(date_to)
     date_sql = (" AND " + " AND ".join(date_conds)) if date_conds else ""
 
     rows = []
-    if want_retail:
+    if filtered and want_retail:
         # Exclude demand notes / pro-formas — they aren't VAT invoices yet.
         rc, rp = ["accountant_sent_date IS NULL",
                   "(awaiting_invoice IS NULL OR awaiting_invoice!='Yes')"], []
@@ -2213,7 +2215,7 @@ def accountant_batch(session: str | None = Cookie(default=None),
                         FROM supplier_invoices WHERE {' AND '.join(rc)}{date_sql}""",
                     rp + date_params, fetch=True) or []):
             rows.append(("supplier", r))
-    if want_prop:
+    if filtered and want_prop:
         for r in (q(f"""SELECT invoice_id, seq_no, property_name loc, supplier_name,
                                invoice_number, invoice_date, gross_amount
                         FROM property_invoices
@@ -2229,8 +2231,8 @@ def accountant_batch(session: str | None = Cookie(default=None),
 
     store_opts = "".join(
         f"<option value='{v}' {'selected' if scope==v else ''}>{lbl}</option>"
-        for v, lbl in [("", "Everything"), ("Uxbridge", "Uxbridge"),
-                       ("Newbury", "Newbury"), ("Property", "Properties")])
+        for v, lbl in [("", "— choose —"), ("Uxbridge", "Uxbridge"),
+                       ("Newbury", "Newbury"), ("Property", "Properties"), ("ALL", "Everything")])
 
     tr = ""
     for src, r in rows:
@@ -2254,7 +2256,12 @@ def accountant_batch(session: str | None = Cookie(default=None),
                  f"border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:700'>{msg}</div>")
 
     today = datetime.now().strftime("%Y-%m-%d")
-    if rows:
+    if not filtered:
+        table_and_form = ("<div class='card' style='margin-top:12px;color:#64748b'>"
+                          "👆 Choose a <b>store / scope</b> above (and, if you like, a date range), then press "
+                          "<b>🔍 Filter</b> to see what's not yet sent. Nothing is listed until you do — so "
+                          "nothing can be marked as sent by accident.</div>")
+    elif rows:
         table_and_form = f"""
         <form method='POST' action='/invoices/accountant-batch/mark'>
           <div class='card' style='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:12px'>
@@ -2287,7 +2294,7 @@ def accountant_batch(session: str | None = Cookie(default=None),
         </script>"""
     else:
         table_and_form = ("<div class='card' style='margin-top:12px;color:#64748b'>"
-                          "No invoices match — nothing outstanding to send. ✅</div>")
+                          "No invoices match — nothing outstanding to send for this selection. ✅</div>")
 
     content = f"""
     {flash}
