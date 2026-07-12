@@ -1137,13 +1137,15 @@ def fill_word_template(template_path: str, fields: dict) -> bytes:
             after  = texts[end_run][end_off:]
             if start_run == end_run:
                 runs[start_run].text = before + val + after
-                can_style = (before == "" and after == "")
+                # style unless real (non-space) text shares the run — a stray
+                # leading/trailing space must NOT block styling (it's invisible)
+                can_style = (before.strip() == "" and after.strip() == "")
             else:
                 runs[start_run].text = before + val
                 for ri in range(start_run + 1, end_run):
                     runs[ri].text = ""
                 runs[end_run].text = after          # keeps the end run's own formatting
-                can_style = (before == "")
+                can_style = (before.strip() == "")
             if can_style and val:
                 _style_value_run(runs[start_run])
 
