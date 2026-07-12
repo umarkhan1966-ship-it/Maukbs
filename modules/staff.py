@@ -68,11 +68,46 @@ def esc(x):
     return html.escape(str(x), quote=True) if x is not None else ""
 
 
-UK_BANK_HOLIDAYS_2026 = [
-    "2026-01-01", "2026-04-03", "2026-04-06",
-    "2026-05-04", "2026-05-25", "2026-08-31",
-    "2026-12-25", "2026-12-28"
-]
+# One-off / special bank holidays (e.g. Jubilees, Coronations) that no formula
+# predicts — add them here by "YYYY-MM-DD" as and when the government announces them.
+EXTRA_BANK_HOLIDAYS = set()
+
+_BH_CACHE = {}
+
+def uk_bank_holidays(year: int) -> set:
+    """UK (England & Wales) bank holidays for any year, computed — so this never
+    needs a manual yearly update. Covers New Year, Good Friday, Easter Monday,
+    the early-May/spring/summer Mondays, Christmas and Boxing Day, applying the
+    'substitute Monday/Tuesday' rule when a fixed date lands on a weekend."""
+    if year in _BH_CACHE:
+        return _BH_CACHE[year]
+    from datetime import date as _date
+    # Easter Sunday via the Anonymous Gregorian algorithm (Computus)
+    a = year % 19; b = year // 100; c = year % 100; d = b // 4; e = b % 4
+    f = (b + 8) // 25; g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30; i = c // 4; k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7; m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31; day = ((h + l - 7 * m + 114) % 31) + 1
+    easter = _date(year, month, day)
+    fixed = [
+        easter - timedelta(days=2),                       # Good Friday
+        easter + timedelta(days=1),                       # Easter Monday
+        _date(year, 5, 1)  + timedelta(days=(7 - _date(year, 5, 1).weekday()) % 7),   # first Mon of May
+        _date(year, 5, 31) - timedelta(days=_date(year, 5, 31).weekday()),            # last Mon of May
+        _date(year, 8, 31) - timedelta(days=_date(year, 8, 31).weekday()),            # last Mon of Aug
+    ]
+    taken = set(fixed)
+    def _subst(d0):
+        d0 = d0
+        while d0.weekday() >= 5 or d0 in taken:          # roll weekends/clashes to next weekday
+            d0 += timedelta(days=1)
+        taken.add(d0); return d0
+    for fixed_date in (_date(year, 1, 1), _date(year, 12, 25), _date(year, 12, 26)):
+        _subst(fixed_date)
+    result = {d.strftime("%Y-%m-%d") for d in taken} | {
+        x for x in EXTRA_BANK_HOLIDAYS if x.startswith(f"{year}-")}
+    _BH_CACHE[year] = result
+    return result
 
 
 def calc_entitlement(contracted_hrs: float) -> float:
@@ -750,13 +785,11 @@ def leave_planner(
             cur = d1
             while cur <= d2:
                 leave_map[(lr["staff_id"], cur.strftime("%Y-%m-%d"))] = lr["leave_type"]
-                cur = cur.replace(day=cur.day+1) if cur.day < 28 else cur.replace(
-                    month=cur.month+1 if cur.month<12 else 1,
-                    year=cur.year+1 if cur.month==12 else cur.year, day=1)
-        except: pass
+                cur = cur + timedelta(days=1)
+        except Exception: pass
 
-    # BH set
-    bh_set = set(UK_BANK_HOLIDAYS_2026)
+    # BH set (computed for the year being viewed)
+    bh_set = uk_bank_holidays(year)
 
     months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
     import calendar
@@ -1582,10 +1615,11 @@ async def submit_leave(staff_id: int, request: Request, session: str | None = Co
     try:
         d1 = datetime.strptime(date_from, "%Y-%m-%d")
         d2 = datetime.strptime(date_to,   "%Y-%m-%d")
+        bh   = uk_bank_holidays(d1.year) | uk_bank_holidays(d2.year)
         days = 0
         cur  = d1
         while cur <= d2:
-            if cur.weekday() < 5 and cur.strftime("%Y-%m-%d") not in UK_BANK_HOLIDAYS_2026:
+            if cur.weekday() < 5 and cur.strftime("%Y-%m-%d") not in bh:
                 days += 1
             cur = cur + timedelta(days=1)
     except Exception:
