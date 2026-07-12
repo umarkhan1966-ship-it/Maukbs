@@ -1373,9 +1373,20 @@ def invoices_page(
                   (_asrc, edit_id), fetch=True) or []
         _can_del = user.get("role") in ("owner", "manager")
         _led = html.escape(str(ledger), quote=True)
+        _view_exts = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
         _alist = ""
         for a in _atts:
-            _lbl = f" <span style='color:#64748b;font-size:12px'>— {html.escape(str(a['label']))}</span>" if a['label'] else ""
+            _name = html.escape(str(a['orig_name'] or 'document'))
+            _ext  = os.path.splitext(str(a['orig_name'] or ''))[1].lower()
+            _href = f"/invoices/attachment/{a['att_id']}"
+            if _ext in _view_exts:   # PDF / image → open in the side-by-side panel
+                _link = (f"<a href='#' onclick=\"showPdf('{_href}');return false;\" "
+                         f"style='color:#0369a1;font-weight:600;text-decoration:none' title='View side-by-side'>📄 {_name}</a>")
+            else:                    # Word / .msg etc — can't preview inline, open normally
+                _link = (f"<a href='{_href}' target='_blank' "
+                         f"style='color:#0369a1;font-weight:600;text-decoration:none' "
+                         f"title='Opens in a new tab (this file type cannot preview side-by-side)'>📄 {_name}</a>")
+            _lbl = f" <span style='color:#0f766e;font-size:12px;font-weight:700'>— {html.escape(str(a['label']))}</span>" if a['label'] else ""
             _del = ""
             if _can_del:
                 _del = (f"<form method='POST' action='/invoices/attachment/{a['att_id']}/delete' style='display:inline'"
@@ -1383,26 +1394,39 @@ def invoices_page(
                         f"<input type='hidden' name='ledger' value='{_led}'>"
                         f"<input type='hidden' name='invoice_id' value='{edit_id}'>"
                         f"<button type='submit' class='btn-secondary' style='font-size:11px;color:#dc2626'>🗑 Remove</button></form>")
-            _alist += (f"<div style='display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #f1f5f9'>"
-                       f"<a href='/invoices/attachment/{a['att_id']}' target='_blank' style='color:#2563eb;font-weight:600;text-decoration:none'>📄 {html.escape(str(a['orig_name'] or 'document'))}</a>{_lbl}"
+            _alist += (f"<div style='display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #cbe8e4'>"
+                       f"{_link}{_lbl}"
                        f"<span style='font-size:11px;color:#94a3b8;margin-left:auto'>{html.escape(str(a['uploaded_by'] or ''))}</span>{_del}</div>")
         if not _atts:
-            _alist = "<div style='font-size:13px;color:#94a3b8;padding:4px 0'>No additional documents yet.</div>"
+            _alist = "<div style='font-size:13px;color:#64748b;padding:4px 0'>No supporting documents attached yet.</div>"
         attachments_html = f"""
-        <div class='card' id='attachments'>
-          <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-2'>📎 Additional documents</div>
-          <div style='font-size:11px;color:#94a3b8;margin-bottom:10px'>Attach the demand note, supporting emails, or any other files for this invoice — the main invoice PDF is managed in the form above. Give each upload a short <b>label</b> so it's easy to identify later. Only the owner can remove documents.</div>
+        <div class='card' id='attachments' style='border-left:5px solid #0d9488;background:#f0fdfa;margin-top:12px'>
+          <div style='font-weight:900;color:#0f766e;margin-bottom:4px'>📎 Supporting documents for this invoice</div>
+          <div style='font-size:11px;color:#475569;margin-bottom:10px'>Demand notes, supplier emails, or any extra files for this invoice — separate from the main invoice PDF above. Pick a file and it previews <b>side-by-side</b> so you can check it's the right one; click an attached PDF/image to view it side-by-side too. Give each a short <b>label</b>. Only the owner can remove.</div>
           {_alist}
           <form method='POST' action='/invoices/attachment/add' enctype='multipart/form-data' style='margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
             <input type='hidden' name='ledger' value='{_led}'>
             <input type='hidden' name='invoice_id' value='{edit_id}'>
-            <input type='file' name='attach_files' multiple required style='font-size:13px'>
-            <input type='text' name='label' required placeholder='label (required, e.g. Demand note)' maxlength='60' style='font-size:13px;padding:6px 10px;border:1px solid #e2e8f0;border-radius:8px'>
+            <input type='file' name='attach_files' multiple required onchange='previewAttachOnPick(this)' style='font-size:13px'>
+            <input type='text' name='label' required placeholder='label (required, e.g. Demand note)' maxlength='60' style='font-size:13px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:8px'>
             <button type='submit' class='btn-secondary' style='font-size:13px'>➕ Attach file(s)</button>
           </form>
+          <script>
+          function previewAttachOnPick(inp){{
+            if(!inp.files || !inp.files.length) return;
+            var f = inp.files[0];
+            var ext = (f.name.split('.').pop()||'').toLowerCase();
+            if(['pdf','png','jpg','jpeg','gif','webp','bmp'].indexOf(ext) === -1) return;  // can't preview others
+            try {{
+              if(window._attObjUrl) URL.revokeObjectURL(window._attObjUrl);
+              window._attObjUrl = URL.createObjectURL(f);
+              showPdf(window._attObjUrl);
+            }} catch(e){{}}
+          }}
+          </script>
         </div>"""
 
-    content = "\n".join([flash, ledger_switcher, summary, search_bar, form_html, attachments_html, notes_html, list_html, js, terms_js])
+    content = "\n".join([flash, ledger_switcher, summary, search_bar, attachments_html, form_html, notes_html, list_html, js, terms_js])
     return page("Invoices", content, user, "invoices")
 
 
