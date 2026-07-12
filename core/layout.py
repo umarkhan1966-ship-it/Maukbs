@@ -82,7 +82,7 @@ def page(title: str, content: str, user: dict, active: str = "") -> str:
        style="background:linear-gradient(180deg,#0f2942 0%,#1e3a5f 100%);">
     <div class="p-5 border-b border-white/10">
       <div class="text-white font-black text-lg tracking-tight">BusinessVault</div>
-      <div class="text-blue-300 text-xs font-semibold mt-0.5">Maukbs Ltd</div>
+      <div class="text-blue-300 text-xs font-semibold mt-0.5">MAUKBs Ltd</div>
     </div>
     <nav class="p-3 space-y-1 text-white">
       {nav_html}

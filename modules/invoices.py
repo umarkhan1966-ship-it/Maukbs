@@ -58,7 +58,7 @@ def fmt_uk_dt(s):
 
 def _norm_spaces(s: str) -> str:
     """Re-insert spaces lost by PDFs that render words with no gaps, e.g.
-    'MaukbsRealEstateLimited' -> 'Maukbs Real Estate Limited',
+    'MAUKBsRealEstateLimited' -> 'MAUKBs Real Estate Limited',
     'VATNumber' -> 'VAT Number'. Only touches case boundaries so it never
     breaks codes like 'SAI1210'."""
     s = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', s)          # camelCase boundary
@@ -334,10 +334,10 @@ def ledger_options(user: dict) -> list[tuple]:
                   fetch=True) or []
         for p in props:
             opts.append((f"PROP:{p['short_name']}", f"🏠 {p['full_address']}"))
-        # MREL = Maukbs Real Estate Ltd: a company-level expenses ledger (not a
+        # MREL = MAUKBs Real Estate Ltd: a company-level expenses ledger (not a
         # rental property), so it's added here rather than in the properties
         # table — keeps it out of rental/mortgage reports.
-        opts.append(("PROP:MREL", "🏢 Maukbs Real Estate Ltd (Company)"))
+        opts.append(("PROP:MREL", "🏢 MAUKBs Real Estate Ltd (Company)"))
     elif role == "manager":
         opts += [("Uxbridge", "🏪 Uxbridge (Retail)"),
                  ("Newbury",  "🏪 Newbury (Retail)")]

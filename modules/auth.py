@@ -65,7 +65,7 @@ def login_page(error: str = ""):
   <div class="w-full max-w-sm">
     <div class="text-center mb-8">
       <div class="text-3xl font-black text-slate-800 tracking-tight">BusinessVault</div>
-      <div class="text-slate-500 text-sm mt-1">Maukbs Ltd · Management System</div>
+      <div class="text-slate-500 text-sm mt-1">MAUKBs Ltd · Management System</div>
     </div>
     <div style="background:white;border-radius:20px;padding:32px;border:1px solid #e2e8f0;box-shadow:0 4px 24px rgba(0,0,0,.06)">
       {err_html}
@@ -86,7 +86,7 @@ def login_page(error: str = ""):
         </button>
       </form>
     </div>
-    <p class="text-center text-xs text-slate-400 mt-6">Maukbs Ltd · Authorised users only</p>
+    <p class="text-center text-xs text-slate-400 mt-6">MAUKBs Ltd · Authorised users only</p>
   </div>
 </body>
 </html>"""

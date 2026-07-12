@@ -1055,7 +1055,7 @@ def get_merge_fields(staff: dict) -> dict:
         "{{EMP_TYPE}}":         emp_type,
         "{{TODAY}}":            today,
         "{{YEAR}}":             str(datetime.now().year),
-        "{{EMPLOYER}}":         "Maukbs Ltd T/A Snappy Snaps",
+        "{{EMPLOYER}}":         employer,
     }
     fields.update(curly)
     return fields
@@ -2666,7 +2666,7 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
               <option value='Sappy Properties (Uxbridge) Llp T/A Snappy Snaps, 178 High Street, Uxbridge, Middlesex, UB8 1LA' {'selected' if fv('s2_employer','').startswith('Sappy') else ''}>
                 Snappy Snaps Uxbridge — 178 High Street, Uxbridge UB8 1LA
               </option>
-              <option value='Maukbs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA' {'selected' if fv('s2_employer','').startswith('Maukbs') else ''}>
+              <option value='MAUKBs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA' {'selected' if fv('s2_employer','').startswith('MAUKBs') else ''}>
                 Snappy Snaps Newbury — 95 Northbrook Street, Newbury RG14 1AA
               </option>
             </select>
@@ -2790,7 +2790,7 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
               <option value='Sappy Properties (Uxbridge) Llp T/A Snappy Snaps, 178 High Street, Uxbridge, Middlesex, UB8 1LA' {'selected' if "Uxbridge" in fv("employer_name","") else ""}>
                 Snappy Snaps Uxbridge — 178 High Street, Uxbridge, Middlesex UB8 1LA
               </option>
-              <option value='Maukbs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA' {'selected' if "Newbury" in fv("employer_name","") else ""}>
+              <option value='MAUKBs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA' {'selected' if "Newbury" in fv("employer_name","") else ""}>
                 Snappy Snaps Newbury — 95 Northbrook Street, Newbury, Berkshire RG14 1AA
               </option>
             </select>

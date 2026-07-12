@@ -271,7 +271,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS store_entities (
             store_name   TEXT PRIMARY KEY,   -- matches store_name used everywhere ('Uxbridge'/'Newbury')
-            legal_name   TEXT NOT NULL,       -- the legal company, e.g. 'Maukbs Ltd'
+            legal_name   TEXT NOT NULL,       -- the legal company, e.g. 'MAUKBs Ltd'
             trading_name TEXT,                -- 'trading as' name, e.g. 'Snappy Snaps Newbury'
             addr_line1   TEXT,
             addr_line2   TEXT,
@@ -312,7 +312,7 @@ def init_db():
 
     # ── Seed the two store entities (INSERT OR IGNORE = existing rows kept) ──
     for store, legal, trading, l1, l2, l3, l4 in [
-        ("Newbury",  "Maukbs Ltd",                     "Snappy Snaps Newbury",
+        ("Newbury",  "MAUKBs Ltd",                     "Snappy Snaps Newbury",
          "95 Northbrook Street", "Newbury", "Berkshire", "RG14 1AA"),
         ("Uxbridge", "Sappy Properties (Uxbridge) LLP", "Snappy Snaps Uxbridge",
          "178 High Street", "Uxbridge", "Middlesex", "UB8 1LA"),
