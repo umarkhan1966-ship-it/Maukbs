@@ -1399,12 +1399,14 @@ def invoices_page(
                        f"<span style='font-size:11px;color:#94a3b8;margin-left:auto'>{html.escape(str(a['uploaded_by'] or ''))}</span>{_del}</div>")
         if not _atts:
             _alist = "<div style='font-size:13px;color:#64748b;padding:4px 0'>No supporting documents attached yet.</div>"
+        import json
+        _existing_js = json.dumps([str(a['orig_name'] or '').strip().lower() for a in _atts])
         attachments_html = f"""
         <div class='card' id='attachments' style='border-left:5px solid #0d9488;background:#f0fdfa;margin-top:12px'>
           <div style='font-weight:900;color:#0f766e;margin-bottom:4px'>📎 Supporting documents for this invoice</div>
           <div style='font-size:11px;color:#475569;margin-bottom:10px'>Demand notes, supplier emails, or any extra files for this invoice — separate from the main invoice PDF above. Pick a file and it previews <b>side-by-side</b> so you can check it's the right one; click an attached PDF/image to view it side-by-side too. Give each a short <b>label</b>. Only the owner can remove.</div>
           {_alist}
-          <form method='POST' action='/invoices/attachment/add' enctype='multipart/form-data' style='margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
+          <form method='POST' action='/invoices/attachment/add' enctype='multipart/form-data' onsubmit='return checkDupAttach(this)' style='margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
             <input type='hidden' name='ledger' value='{_led}'>
             <input type='hidden' name='invoice_id' value='{edit_id}'>
             <input type='file' name='attach_files' multiple required onchange='previewAttachOnPick(this)' style='font-size:13px'>
@@ -1422,6 +1424,18 @@ def invoices_page(
               window._attObjUrl = URL.createObjectURL(f);
               showPdf(window._attObjUrl);
             }} catch(e){{}}
+          }}
+          var _existingAtt = {_existing_js};
+          function checkDupAttach(form){{
+            var inp = form.querySelector('[name="attach_files"]');
+            if(!inp || !inp.files || !inp.files.length) return true;
+            for(var i=0;i<inp.files.length;i++){{
+              var nm = (inp.files[i].name||'').trim().toLowerCase();
+              if(_existingAtt.indexOf(nm) !== -1){{
+                if(!confirm('A file named "'+inp.files[i].name+'" is already attached to this invoice.\\n\\nAttach it again anyway?')) return false;
+              }}
+            }}
+            return true;
           }}
           </script>
         </div>"""
