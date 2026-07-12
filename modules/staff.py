@@ -1088,28 +1088,64 @@ def fill_word_template(template_path: str, fields: dict) -> bytes:
         buf_out.seek(0)
         doc = DocxDocument(buf_out)
 
+    from docx.shared import RGBColor
+    FILL_RGB = RGBColor(0x00, 0x00, 0x80)   # navy — house style for merged-in values (matches Umar's macro)
+
+    def _style_value_run(run):
+        run.font.color.rgb = FILL_RGB
+        run.font.bold = True
+
     def replace_para_text(para):
-        """Replace merge fields even when split across runs."""
-        # First try simple per-run replacement
-        for run in para.runs:
+        """Replace merge fields, even where a field is split across several runs,
+        and colour ONLY the filled-in value navy+bold (leaving all other text —
+        labels, body, the red signing 'X' — exactly as the template has it)."""
+        runs = para.runs
+        if not runs:
+            return
+        guard = 0
+        while guard < 500:                      # each pass replaces one field; guard against loops
+            guard += 1
+            texts = [r.text for r in runs]
+            full  = "".join(texts)
+            # earliest-appearing placeholder in this paragraph
+            hit = None
             for key, val in fields.items():
-                if key in run.text:
-                    run.text = run.text.replace(key, val)
+                i = full.find(key)
+                if i != -1 and (hit is None or i < hit[1]):
+                    hit = (key, i, val)
+            if hit is None:
+                break
+            key, start, val = hit
+            end = start + len(key)
+            val = "" if val is None else str(val)
 
-        # Then handle split runs by rebuilding full paragraph text
-        full_text = para.text
-        changed = False
-        for key, val in fields.items():
-            if key in full_text:
-                full_text = full_text.replace(key, val)
-                changed = True
+            # locate the run(s) the placeholder spans
+            pos = start_run = start_off = end_run = end_off = None
+            pos = 0
+            for ri, t in enumerate(texts):
+                rlen = len(t)
+                if start_run is None and start < pos + rlen:
+                    start_run, start_off = ri, start - pos
+                if end <= pos + rlen:
+                    end_run, end_off = ri, end - pos
+                    break
+                pos += rlen
+            if start_run is None or end_run is None:
+                break
 
-        if changed:
-            # Put all text in first run, clear others
-            if para.runs:
-                para.runs[0].text = full_text
-                for run in para.runs[1:]:
-                    run.text = ''
+            before = texts[start_run][:start_off]
+            after  = texts[end_run][end_off:]
+            if start_run == end_run:
+                runs[start_run].text = before + val + after
+                can_style = (before == "" and after == "")
+            else:
+                runs[start_run].text = before + val
+                for ri in range(start_run + 1, end_run):
+                    runs[ri].text = ""
+                runs[end_run].text = after          # keeps the end run's own formatting
+                can_style = (before == "")
+            if can_style and val:
+                _style_value_run(runs[start_run])
 
     for para in doc.paragraphs:
         replace_para_text(para)
