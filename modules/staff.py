@@ -1065,15 +1065,28 @@ def fill_word_template(template_path: str, fields: dict) -> bytes:
     """Fill a Word .docx/.dotx template with merge fields and return as bytes.
     Handles split runs where a merge field spans multiple runs in the same paragraph.
     """
-    # For .dotx files, copy to a temp .docx first
-    import tempfile, shutil
-    if template_path.lower().endswith('.dotx'):
-        tmp = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
-        shutil.copy(template_path, tmp.name)
-        doc = DocxDocument(tmp.name)
-        os.unlink(tmp.name)
-    else:
-        doc = DocxDocument(template_path)
+    # Open the template. Word *template* files (.dotx, or .docx that were saved
+    # from a .dotx) are marked internally as a "template" content-type, which the
+    # docx library refuses to open. Detect that by what's INSIDE the file (not the
+    # filename) and rewrite the content-type to a normal document on the fly.
+    import zipfile
+    with open(template_path, "rb") as fh:
+        raw = fh.read()
+    try:
+        doc = DocxDocument(io.BytesIO(raw))
+    except ValueError:
+        buf_out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(raw)) as zin, \
+             zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.namelist():
+                data = zin.read(item)
+                if item == "[Content_Types].xml":
+                    data = data.replace(
+                        b"wordprocessingml.template.main+xml",
+                        b"wordprocessingml.document.main+xml")
+                zout.writestr(item, data)
+        buf_out.seek(0)
+        doc = DocxDocument(buf_out)
 
     def replace_para_text(para):
         """Replace merge fields even when split across runs."""
