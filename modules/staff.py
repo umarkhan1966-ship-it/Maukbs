@@ -128,25 +128,22 @@ def get_leave_summary(staff_id: int, year: int = None) -> dict:
     # Days taken this year by type
     daily = contracted / 5 if contracted else 7.5
 
-    taken_h = q("""SELECT COUNT(*) as n FROM leave_requests
-                   WHERE staff_id=? AND status='approved'
-                   AND leave_type='H' AND strftime('%Y',date_from)=?""",
-                (staff_id, str(year)), fetch=True)
-    holiday_days = taken_h[0]["n"] if taken_h else 0
+    # Sum the DAYS in each approved request (days_taken) — NOT the number of
+    # requests. A single 5-day holiday is one row with days_taken=5, so counting
+    # rows would record it as 1 day. COALESCE handles missing rows/values.
+    def _days_taken(ltype):
+        r = q("""SELECT COALESCE(SUM(COALESCE(days_taken,1)),0) AS d FROM leave_requests
+                 WHERE staff_id=? AND status='approved'
+                 AND leave_type=? AND strftime('%Y',date_from)=?""",
+              (staff_id, ltype, str(year)), fetch=True)
+        d = (r[0]["d"] if r else 0) or 0
+        return int(d) if float(d).is_integer() else round(d, 1)   # 5.0 -> 5, keep 0.5
+
+    holiday_days = _days_taken('H')
     taken_hrs    = holiday_days * daily
-
-    bh_used = q("""SELECT COUNT(*) as n FROM leave_requests
-                   WHERE staff_id=? AND status='approved'
-                   AND leave_type='B' AND strftime('%Y',date_from)=?""",
-                (staff_id, str(year)), fetch=True)
-    bh_days = bh_used[0]["n"] if bh_used else 0
-    bh_hrs  = bh_days * daily
-
-    sick_used = q("""SELECT COUNT(*) as n FROM leave_requests
-                     WHERE staff_id=? AND status='approved'
-                     AND leave_type='S' AND strftime('%Y',date_from)=?""",
-                  (staff_id, str(year)), fetch=True)
-    sick_days = sick_used[0]["n"] if sick_used else 0
+    bh_days      = _days_taken('B')
+    bh_hrs       = bh_days * daily
+    sick_days    = _days_taken('S')
 
     balance_hrs = entitlement_hrs - taken_hrs - bh_hrs
     # Sick days tracked separately — don't affect holiday balance
@@ -159,7 +156,7 @@ def get_leave_summary(staff_id: int, year: int = None) -> dict:
         "entitlement_fmt":  fmt_entitlement(entitlement_hrs, contracted),
         "taken_hrs":        round(taken_hrs, 1),
         "taken_days":       holiday_days,
-        "taken_fmt":        f"{holiday_days} days",
+        "taken_fmt":        f"{holiday_days:g} days",
         "bh_days":          bh_days,
         "bh_hrs":           round(bh_hrs, 1),
         "sick_days":        sick_days,
