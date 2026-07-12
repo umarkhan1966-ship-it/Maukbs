@@ -51,6 +51,17 @@ def _staff_access_guard(user, staff_id):
                             status_code=303)
 
 
+def _safe_part(s):
+    """Filename-safe token — blocks path traversal via user-supplied name parts."""
+    return (re.sub(r"[^A-Za-z0-9_-]", "_", str(s or ""))[:40]) or "x"
+
+
+def _safe_ext(ext):
+    """Whitelist upload extensions; unknown types become .dat (never executable)."""
+    e = re.sub(r"[^a-z0-9.]", "", str(ext or "").lower())[:6]
+    return e if e in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg", ".webp") else ".dat"
+
+
 UK_BANK_HOLIDAYS_2026 = [
     "2026-01-01", "2026-04-03", "2026-04-06",
     "2026-05-04", "2026-05-25", "2026-08-31",
@@ -1470,10 +1481,8 @@ async def submit_leave(staff_id: int, request: Request, session: str | None = Co
         while cur <= d2:
             if cur.weekday() < 5 and cur.strftime("%Y-%m-%d") not in UK_BANK_HOLIDAYS_2026:
                 days += 1
-            cur = cur.replace(day=cur.day+1) if cur.day < 28 else cur.replace(
-                month=cur.month+1 if cur.month<12 else 1,
-                year=cur.year+1 if cur.month==12 else cur.year, day=1)
-    except:
+            cur = cur + timedelta(days=1)
+    except Exception:
         days = 1
 
     # Auto-approve for manager/owner, else pending
@@ -1929,12 +1938,18 @@ async def upload_staff_doc(
     q("UPDATE staff_documents SET is_current=0 WHERE staff_id=? AND doc_type=?",
       (staff_id, doc_type))
 
-    # Save file
+    # Save file (sanitise name parts to prevent path traversal; whitelist ext; cap size)
     ext      = os.path.splitext(doc_file.filename)[1].lower()
-    filename = f"staff_{staff_id}_{doc_type.replace(' ','_')}_v{next_ver}{ext}"
+    filename = f"staff_{staff_id}_{_safe_part(doc_type)}_v{next_ver}{_safe_ext(ext)}"
     filepath = os.path.join(DOCS_DIR, filename)
+    data = await doc_file.read()
+    if len(data) > 25 * 1024 * 1024:
+        from urllib.parse import quote as uq
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg={uq('File too large (max 25 MB)')}&msg_type=error",
+                                status_code=303)
+    os.makedirs(DOCS_DIR, exist_ok=True)
     with open(filepath, "wb") as f:
-        f.write(await doc_file.read())
+        f.write(data)
 
     q("""INSERT INTO staff_documents
             (staff_id, doc_type, version, file_path, file_name,
@@ -2851,12 +2866,18 @@ async def upload_paper_form(
             f"/staff/{staff_id}/onboarding?msg={uq('No file selected')}&msg_type=error",
             status_code=303)
 
-    # Save the file
+    # Save the file (sanitise name parts to prevent path traversal; whitelist ext; cap size)
     ext      = os.path.splitext(paper.filename)[1].lower()
-    filename = f"onboard_{staff_id}_{form_type}_paper{ext}"
+    filename = f"onboard_{staff_id}_{_safe_part(form_type)}_paper{_safe_ext(ext)}"
     filepath = os.path.join(DOCS_DIR, filename)
+    data = await paper.read()
+    if len(data) > 25 * 1024 * 1024:
+        from urllib.parse import quote as uq
+        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('File too large (max 25 MB)')}&msg_type=error",
+                                status_code=303)
+    os.makedirs(DOCS_DIR, exist_ok=True)
     with open(filepath, "wb") as f:
-        f.write(await paper.read())
+        f.write(data)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
