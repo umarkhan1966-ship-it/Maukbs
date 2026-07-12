@@ -310,6 +310,7 @@ def init_db():
         ("under_query",          "under_query TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
+        ("claimable_vat",        "claimable_vat REAL"),
     ])
     ensure_columns("property_invoices", [
         ("seq_no",               "seq_no INTEGER"),
@@ -321,9 +322,11 @@ def init_db():
         ("under_query",          "under_query TEXT"),
         ("updated_by",           "updated_by TEXT"),
         ("updated_at",           "updated_at TEXT"),
+        ("claimable_vat",        "claimable_vat REAL"),
     ])
     ensure_columns("supplier_terms", [
         ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit
+        ("vat_reclaim_pct", "vat_reclaim_pct INTEGER"),   # NULL/100 = fully reclaimable; e.g. 50 for company-car leases
     ])
 
     conn.commit()

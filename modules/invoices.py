@@ -552,6 +552,10 @@ def invoices_page(
                     (), fetch=True) or []
     supplier_terms_js = json.dumps({r["supplier_name"]: {"t": r["term_type"], "v": r["term_value"]}
                                     for r in _terms_rows})
+    # Supplier -> VAT reclaim % (only those with a non-default %, e.g. Alphabet=50).
+    _vat_rows = q("SELECT supplier_name, vat_reclaim_pct FROM supplier_terms WHERE vat_reclaim_pct IS NOT NULL",
+                  (), fetch=True) or []
+    supplier_vat_js = json.dumps({r["supplier_name"]: r["vat_reclaim_pct"] for r in _vat_rows})
     # Existing supplier names for the Supplier field's autocomplete (cuts down
     # duplicates/typos by suggesting names already on record).
     _sup_rows = q("""SELECT DISTINCT supplier_name s FROM (
@@ -820,6 +824,8 @@ def invoices_page(
           {fi('gross_amount',   'Gross Amount (£)', 'number', inv.get('gross_amount',0), hi=True)}
           {fi('vat_amount',     'VAT Amount (£)',   'number', inv.get('vat_amount',0), lock=lock_calc, calc=True)}
           {fi('net_amount',     'Net Amount (£)',   'number', inv.get('net_amount',0), lock=lock_calc, calc=True)}
+          {fi('claimable_vat',  'Claimable VAT (£)','number', inv.get('claimable_vat',''), lock=lock_calc, calc=True)}
+          <div id='vatnote' style='grid-column:1/-1;font-size:12px;color:#0369a1;font-weight:700;margin-top:-4px'></div>
           {'' if is_prop else fi('payment_terms', 'Terms (days)', 'number', inv.get('payment_terms',''), lock=lock_calc, calc=True)}
           {prop_or_store_field}
           {accountant_field}
@@ -1440,7 +1446,44 @@ def invoices_page(
           </script>
         </div>"""
 
-    content = "\n".join([flash, ledger_switcher, summary, search_bar, attachments_html, form_html, notes_html, list_html, js, terms_js])
+    vat_js = f"""
+    <script>
+    (function(){{
+      var SUPPLIER_VAT = {supplier_vat_js};
+      var vat   = document.querySelector('[name="vat_amount"]');
+      var gross = document.querySelector('[name="gross_amount"]');
+      var sup   = document.querySelector('[name="supplier_name"]');
+      var claim = document.querySelector('[name="claimable_vat"]');
+      var note  = document.getElementById('vatnote');
+      function pct(){{
+        var name = sup ? (sup.value||'').trim() : '';
+        return (SUPPLIER_VAT[name] != null) ? SUPPLIER_VAT[name] : 100;
+      }}
+      function showNote(){{
+        if(!note) return;
+        var p = pct();
+        note.textContent = (p < 100) ? ('Only ' + p + '% of the VAT is reclaimable for this supplier (e.g. company car — HMRC).') : '';
+      }}
+      function recalcClaimable(){{
+        showNote();
+        if(!vat || !claim) return;
+        if(claim.dataset.manual) return;      // owner typed a value — leave it
+        var v = parseFloat(vat.value) || 0;
+        claim.value = (v * pct() / 100).toFixed(2);
+      }}
+      if(claim) claim.addEventListener('input', function(){{ claim.dataset.manual='1'; }});
+      if(vat)   vat.addEventListener('input', recalcClaimable);
+      if(gross) gross.addEventListener('input', function(){{ setTimeout(recalcClaimable, 0); }});
+      if(sup){{ sup.addEventListener('change', recalcClaimable); sup.addEventListener('blur', recalcClaimable); }}
+      // On load: always show the note; only AUTO-fill the figure for a NEW invoice,
+      // so opening a saved invoice never overwrites its stored claimable VAT.
+      showNote();
+      var f = document.getElementById('invoiceForm');
+      if(f && (f.getAttribute('action')||'').indexOf('/save/0') !== -1) recalcClaimable();
+    }})();
+    </script>
+    """
+    content = "\n".join([flash, ledger_switcher, summary, search_bar, attachments_html, form_html, notes_html, list_html, js, terms_js, vat_js])
     return page("Invoices", content, user, "invoices")
 
 
@@ -1514,6 +1557,13 @@ async def save_invoice(
     gross      = fnum("gross_amount")
     vat        = fnum("vat_amount")
     net        = fnum("net_amount")
+    claimable  = fnum("claimable_vat")
+    # If claimable VAT wasn't supplied (e.g. a new invoice with JS off), derive it
+    # from the supplier's VAT reclaim % (100% for all except ones you've set, e.g. Alphabet 50%).
+    if not claimable and vat:
+        _rp = q("SELECT vat_reclaim_pct FROM supplier_terms WHERE supplier_name=?", (supplier,), fetch=True)
+        _pct = (_rp[0]["vat_reclaim_pct"] if _rp and _rp[0]["vat_reclaim_pct"] is not None else 100)
+        claimable = round((vat or 0) * _pct / 100.0, 2)
     terms      = fint("payment_terms")
     comments   = fv("comments")     or None
     is_paid    = fv("is_paid", "No")
@@ -1679,22 +1729,22 @@ async def save_invoice(
                  expense_type, gross_amount, vat_amount, net_amount, due_date,
                  paid_date, amount_paid, is_paid, payment_method, cheque_number,
                  accountant_sent_date, comments, pdf_path, approval_status,
-                 submitted_by, created_at, awaiting_invoice, demand_ref, linked_ref, under_query)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 submitted_by, created_at, awaiting_invoice, demand_ref, linked_ref, under_query, claimable_vat)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (seq_no, loc_val, supplier, inv_no, inv_date, exp_type,
                gross, vat, net, due_date, paid_date, amt_paid, is_paid, pay_method,
                chq_no, acct_sent, comments, pdf_path, approval_status,
-               submitted_by, now_ts, awaiting, demand_ref, linked_ref, under_query))
+               submitted_by, now_ts, awaiting, demand_ref, linked_ref, under_query, claimable))
         else:
             q(f"""INSERT OR IGNORE INTO {table}
                 (store_name, seq_no, supplier_name, invoice_number, invoice_date,
                  gross_amount, vat_amount, net_amount, due_date, payment_terms,
                  comments, is_paid, payment_method, pdf_path, approval_status, submitted_by, created_at,
-                 awaiting_invoice, demand_ref, linked_ref, under_query)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 awaiting_invoice, demand_ref, linked_ref, under_query, claimable_vat)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (loc_val, seq_no, supplier, inv_no, inv_date,
                gross, vat, net, due_date, terms, comments, is_paid, pay_method, pdf_path,
-               approval_status, submitted_by, now_ts, awaiting, demand_ref, linked_ref, under_query))
+               approval_status, submitted_by, now_ts, awaiting, demand_ref, linked_ref, under_query, claimable))
         if approval_status == "pending":
             msg = f"Invoice submitted for approval — {supplier} {inv_no}"
         else:
@@ -1709,13 +1759,13 @@ async def save_invoice(
                 expense_type=?, gross_amount=?, vat_amount=?, net_amount=?,
                 due_date=?, comments=?, is_paid=?,
                 paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
-                cheque_number=?, awaiting_invoice=?, demand_ref=?, under_query=?{acct_set}{appr_set}{lnk_set},
+                cheque_number=?, awaiting_invoice=?, demand_ref=?, under_query=?, claimable_vat=?{acct_set}{appr_set}{lnk_set},
                 updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([seq_no, supplier, inv_no, inv_date, exp_type, gross, vat, net,
                 due_date, comments, is_paid, paid_date, pay_method, amt_paid, credit,
-                chq_no, awaiting, demand_ref, under_query] + acct_val + appr_val + lnk_val + [submitted_by, now_ts]
+                chq_no, awaiting, demand_ref, under_query, claimable] + acct_val + appr_val + lnk_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         else:
             # Only the owner sees/edits "Sent to Accountant", so only touch it on
@@ -1728,13 +1778,13 @@ async def save_invoice(
                 due_date=?, payment_terms=?, comments=?, is_paid=?,
                 paid_date=?, payment_method=?, amount_paid=?, credit_note=?,
                 dd_statement_date=?, cheque_number=?,
-                awaiting_invoice=?, demand_ref=?, under_query=?{acct_set}{appr_set}{lnk_set},
+                awaiting_invoice=?, demand_ref=?, under_query=?, claimable_vat=?{acct_set}{appr_set}{lnk_set},
                 updated_by=?, updated_at=?
                 {', pdf_path=?' if pdf_path else ''}
                 WHERE invoice_id=?""",
               ([seq_no, supplier, inv_no, inv_date, gross, vat, net,
                 due_date, terms, comments, is_paid, paid_date,
-                pay_method, amt_paid, credit, dd_stmt, chq_no, awaiting, demand_ref, under_query]
+                pay_method, amt_paid, credit, dd_stmt, chq_no, awaiting, demand_ref, under_query, claimable]
                + acct_val + appr_val + lnk_val + [submitted_by, now_ts]
                + ([pdf_path] if pdf_path else []) + [invoice_id]))
         msg = f"Invoice updated — {supplier} {inv_no}"
@@ -3254,7 +3304,7 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
         return RedirectResponse("/invoices?msg=Supplier+terms+is+owner-only&msg_type=error", status_code=303)
 
     rows = q("""
-        SELECT s.supplier_name sn, s.n cnt, t.term_type tt, t.term_value tv, t.pays_dd dd
+        SELECT s.supplier_name sn, s.n cnt, t.term_type tt, t.term_value tv, t.pays_dd dd, t.vat_reclaim_pct vp
         FROM (SELECT supplier_name, COUNT(*) n FROM (
                 SELECT supplier_name FROM supplier_invoices
                 UNION ALL SELECT supplier_name FROM property_invoices) GROUP BY supplier_name) s
@@ -3282,6 +3332,9 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
                f"min='0' style='width:90px;padding:4px 6px' placeholder='days / months'></td>"
                f"<td style='text-align:center'><input type='checkbox' name='dd_{i}' value='Yes' "
                f"{'checked' if r['dd']=='Yes' else ''}></td>"
+               f"<td style='text-align:center'><input type='number' name='vatpct_{i}' value='{r['vp'] if r['vp'] is not None else ''}' "
+               f"min='0' max='100' style='width:70px;padding:4px 6px' placeholder='100' "
+               f"title='% of VAT you can reclaim; blank/100 = full. e.g. 50 for company-car leases'></td>"
                f"<td><button type='button' class='renamebtn' data-sup=\"{esc}\" "
                f"style='font-size:12px;padding:3px 8px;border:1px solid #cbd5e1;border-radius:6px;"
                f"background:white;cursor:pointer'>✏️ Rename</button></td></tr>")
@@ -3320,7 +3373,7 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
               <th style='cursor:pointer' onclick='sortSt(0,false)'>Supplier ⇅</th>
               <th style='cursor:pointer;text-align:right' onclick='sortSt(1,true)'>Invoices ⇅</th>
               <th style='cursor:pointer' onclick='sortSt(2,false)'>Term type ⇅</th>
-              <th>Days / Months</th><th title='Auto-set Payment Method to Direct Debit on new invoices'>Pays by DD?</th><th>Tidy up</th></tr></thead>
+              <th>Days / Months</th><th title='Auto-set Payment Method to Direct Debit on new invoices'>Pays by DD?</th><th title='% of VAT reclaimable; blank = 100%. e.g. 50 for company-car leases'>VAT reclaim %</th><th>Tidy up</th></tr></thead>
             <tbody id='sttbody'>{tr or "<tr><td colspan='5' style='text-align:center;padding:24px;color:#94a3b8'>No suppliers yet</td></tr>"}</tbody>
           </table>
         </div>
@@ -3404,23 +3457,30 @@ async def supplier_terms_save(request: Request, session: str | None = Cookie(def
         # Forgiving: a number entered without choosing a type means "Net N days".
         if tval is not None and ttype not in ("days", "eom"):
             ttype = "days"
+        has_term = ttype in ("days", "eom") and tval is not None
+        if not has_term:
+            ttype, tval = None, None
         dd_flag = "Yes" if form.get(f"dd_{i}") else None
-        if ttype in ("days", "eom") and tval is not None:
-            cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, pays_dd, updated_by, updated_at)
-                           VALUES (?,?,?,?,?,?)
+        # VAT reclaim %: blank or >=100 = fully reclaimable (stored NULL = 100%);
+        # a value like 50 = only 50% reclaimable (e.g. company-car leases).
+        vraw = form.get(f"vatpct_{i}")
+        try:
+            vpct = int(vraw) if vraw not in (None, "") else None
+        except (TypeError, ValueError):
+            vpct = None
+        if vpct is not None and (vpct >= 100 or vpct < 0):
+            vpct = None
+        if has_term or dd_flag == "Yes" or vpct is not None:
+            cur.execute("""INSERT INTO supplier_terms
+                             (supplier_name, term_type, term_value, pays_dd, vat_reclaim_pct, updated_by, updated_at)
+                           VALUES (?,?,?,?,?,?,?)
                            ON CONFLICT(supplier_name) DO UPDATE SET
                              term_type=excluded.term_type, term_value=excluded.term_value,
-                             pays_dd=excluded.pays_dd,
+                             pays_dd=excluded.pays_dd, vat_reclaim_pct=excluded.vat_reclaim_pct,
                              updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
-                        (sup, ttype, tval, dd_flag, uname, now))
-            saved += 1
-        elif dd_flag == "Yes":
-            # No term rule, but flagged as paying by DD — keep a row for the DD flag.
-            cur.execute("""INSERT INTO supplier_terms (supplier_name, term_type, term_value, pays_dd, updated_by, updated_at)
-                           VALUES (?, NULL, NULL, 'Yes', ?, ?)
-                           ON CONFLICT(supplier_name) DO UPDATE SET
-                             pays_dd='Yes', updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
-                        (sup, uname, now))
+                        (sup, ttype, tval, dd_flag, vpct, uname, now))
+            if has_term:
+                saved += 1
         else:
             cur.execute("DELETE FROM supplier_terms WHERE supplier_name=?", (sup,))
         i += 1
