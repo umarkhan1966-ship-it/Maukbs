@@ -1,5 +1,5 @@
 """staff routes."""
-import os, io, re, uuid, math, shutil, secrets, hashlib
+import os, io, re, uuid, math, shutil, secrets, hashlib, html
 from datetime import datetime, timedelta, date
 from fastapi import APIRouter, Request, Form, Cookie, UploadFile, File
 from fastapi.responses import (HTMLResponse, RedirectResponse, FileResponse,
@@ -60,6 +60,12 @@ def _safe_ext(ext):
     """Whitelist upload extensions; unknown types become .dat (never executable)."""
     e = re.sub(r"[^a-z0-9.]", "", str(ext or "").lower())[:6]
     return e if e in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg", ".webp") else ".dat"
+
+
+def esc(x):
+    """HTML-escape a value (guards stored XSS from user-entered fields like
+    names/addresses that render into pages other users view)."""
+    return html.escape(str(x), quote=True) if x is not None else ""
 
 
 UK_BANK_HOLIDAYS_2026 = [
@@ -336,7 +342,7 @@ def staff_page(
     for s in staff:
         s = dict(s)
         sid   = s["staff_id"]
-        name  = f"{s['first_name']} {s['last_name']}"
+        name  = esc(f"{s['first_name']} {s['last_name']}")
         store_badge = f"<span style='background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px'>{s.get('store_name','')}</span>"
         status_badge = "<span class='badge-paid'>Active</span>" if s["is_active"] else "<span class='badge-overdue'>Left</span>"
 
@@ -655,10 +661,11 @@ def leave_requests(session: str | None = Cookie(default=None)):
         actions = ""
         if show_actions:
             actions = f"""
-            <a href='/staff/leave-requests/{lr['request_id']}/approve'
-               class='btn-success' style='padding:4px 10px;font-size:11px'>✅ Approve</a>
-            <a href='/staff/leave-requests/{lr['request_id']}/decline'
-               class='btn-danger' style='padding:4px 10px;font-size:11px'>❌ Decline</a>"""
+            <form method='POST' action='/staff/leave-requests/{lr['request_id']}/approve' style='display:inline'>
+              <button type='submit' class='btn-success' style='padding:4px 10px;font-size:11px'>✅ Approve</button></form>
+            <form method='POST' action='/staff/leave-requests/{lr['request_id']}/decline' style='display:inline'
+                  onsubmit="return confirm('Decline this leave request?');">
+              <button type='submit' class='btn-danger' style='padding:4px 10px;font-size:11px'>❌ Decline</button></form>"""
         return f"""<tr>
           <td style='font-weight:700'>{name}</td>
           <td style='font-size:12px;color:#64748b'>{lr.get('store_name','')}</td>
@@ -906,8 +913,8 @@ def pay_overview(session: str | None = Cookie(default=None)):
         dob = s.get("date_of_birth","")
         age = ((datetime.now() - datetime.strptime(dob,"%Y-%m-%d")).days//365) if dob else "?"
         rows_html += f"""<tr>
-          <td style='font-weight:700'>{s['first_name']} {s['last_name']}</td>
-          <td style='font-size:12px;color:#64748b'>{s.get('store_name','')}</td>
+          <td style='font-weight:700'>{esc(s['first_name'])} {esc(s['last_name'])}</td>
+          <td style='font-size:12px;color:#64748b'>{esc(s.get('store_name',''))}</td>
           <td>{age}</td>
           <td class='mono' style='font-weight:700'>£{current:.2f}</td>
           <td class='mono' style='color:#64748b'>£{nmw:.2f}</td>
@@ -1120,7 +1127,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         ORDER BY work_date DESC LIMIT 10
     """, (f"{s['first_name']} {s['last_name']}",), fetch=True) or []
 
-    name = f"{s['first_name']} {s['last_name']}"
+    name = esc(f"{s['first_name']} {s['last_name']}")
 
     # ── Leave history table ──
     leave_rows = ""
@@ -1202,9 +1209,9 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
       <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Personal Details</div>
       <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(200px,1fr));font-size:13px'>
         <div><span style='color:#94a3b8;font-weight:700'>Date of Birth</span><br>{s.get('date_of_birth') or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Phone</span><br>{s.get('phone') or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Email</span><br>{s.get('email') or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Address</span><br>{', '.join(filter(None,[s.get('address_1'),s.get('address_2'),s.get('address_3'),s.get('postcode')])) or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Phone</span><br>{esc(s.get('phone')) or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Email</span><br>{esc(s.get('email')) or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Address</span><br>{esc(', '.join(filter(None,[s.get('address_1'),s.get('address_2'),s.get('address_3'),s.get('postcode')]))) or '—'}</div>
         <div><span style='color:#94a3b8;font-weight:700'>Date Joined</span><br>{s.get('date_joined') or '—'}</div>
         <div><span style='color:#94a3b8;font-weight:700'>Hourly Rate</span><br>{'£'+str(s['hourly_rate'])+'/hr' if s.get('hourly_rate') else '—'}</div>
       </div>
@@ -1277,7 +1284,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
             o = "".join(f"<option value='{ov}' {'selected' if str(safe)==str(ov) else ''}>{ol}</option>"
                         for ov,ol in opts)
             return f"<div><label>{label}</label><select name='{name}' {req_a} {dis_a}>{o}</select></div>"
-        return f"<div><label>{label}</label><input type='{ftype}' name='{name}' value='{safe}' {req_a} {dis_a} {step} {ph}></div>"
+        return f"<div><label>{label}</label><input type='{ftype}' name='{name}' value='{esc(safe)}' {req_a} {dis_a} {step} {ph}></div>"
 
     store_opts = [("","-- Select --"),("Uxbridge","Uxbridge"),("Newbury","Newbury")]
     sex_opts   = [("","--"),("M","Male"),("F","Female"),("O","Other")]
@@ -1500,7 +1507,7 @@ async def submit_leave(staff_id: int, request: Request, session: str | None = Co
     return RedirectResponse(f"/staff/{staff_id}?msg={uq(msg)}", status_code=303)
 
 
-@router.get("/staff/leave-requests/{req_id}/approve")
+@router.post("/staff/leave-requests/{req_id}/approve")
 def approve_leave(req_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
@@ -1510,7 +1517,7 @@ def approve_leave(req_id: int, session: str | None = Cookie(default=None)):
     return RedirectResponse("/staff/leave-requests", status_code=303)
 
 
-@router.get("/staff/leave-requests/{req_id}/decline")
+@router.post("/staff/leave-requests/{req_id}/decline")
 def decline_leave(req_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
