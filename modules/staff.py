@@ -18,6 +18,39 @@ from docx.shared import Pt
 router = APIRouter()
 
 
+# ── Access-control helpers ──────────────────────────────────────────────────
+# The Staff module holds sensitive personal/pay/tax data. Management routes are
+# owner/manager only; self-service {staff_id} routes let a staff member reach
+# ONLY their own record (owner/manager may reach anyone).
+def _is_mgr(user) -> bool:
+    return user.get("role") in ("owner", "manager")
+
+
+def _require_mgr(user):
+    """Bail (RedirectResponse) if the user isn't owner/manager, else None."""
+    if not _is_mgr(user):
+        return RedirectResponse("/?msg=That+area+is+for+managers+only&msg_type=error", status_code=303)
+    return None
+
+
+def _own_staff_id(user):
+    """staff_id of the logged-in user's own profile (matched on full name), or None."""
+    rows = q("SELECT staff_id FROM staff_profiles WHERE first_name||' '||last_name=? AND is_active=1",
+             (user.get("full_name", ""),), fetch=True)
+    return rows[0]["staff_id"] if rows else None
+
+
+def _staff_access_guard(user, staff_id):
+    """Self-service routes: owner/manager may access anyone; a staff user may
+    access only their own record. Bail (RedirectResponse) otherwise, else None."""
+    if _is_mgr(user):
+        return None
+    if _own_staff_id(user) == staff_id:
+        return None
+    return RedirectResponse("/my-profile?msg=You+can+only+access+your+own+record&msg_type=error",
+                            status_code=303)
+
+
 UK_BANK_HOLIDAYS_2026 = [
     "2026-01-01", "2026-04-03", "2026-04-06",
     "2026-05-04", "2026-05-25", "2026-08-31",
@@ -239,6 +272,7 @@ def staff_page(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     is_owner = user["role"] == "owner"
 
     # Build filter
@@ -558,6 +592,7 @@ def delete_template(template_id: int, session: str | None = Cookie(default=None)
 def download_template(template_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     rows = q("SELECT * FROM document_templates WHERE template_id=?", (template_id,), fetch=True)
     if not rows: return HTMLResponse("<p>Not found</p>", status_code=404)
     t = dict(rows[0])
@@ -666,6 +701,7 @@ def leave_planner(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     if not year: year = datetime.now().year
 
     # Get store filter
@@ -1303,6 +1339,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
 async def save_new_staff(request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     form = await request.form()
     fv = lambda k, d="": str(form.get(k, d) or d).strip()
     fn = lambda k: float(form.get(k, 0) or 0) if form.get(k) else None
@@ -1326,6 +1363,7 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
 async def save_staff(staff_id: int, request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     form = await request.form()
     fv = lambda k, d="": str(form.get(k, d) or d).strip()
     fn = lambda k: float(form.get(k, 0) or 0) if form.get(k) else None
@@ -1363,6 +1401,7 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
 def request_leave_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
     s    = dict(rows[0])
@@ -1415,6 +1454,7 @@ def request_leave_form(staff_id: int, session: str | None = Cookie(default=None)
 async def submit_leave(staff_id: int, request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     form       = await request.form()
     leave_type = form.get("leave_type","H")
     date_from  = form.get("date_from","")
@@ -1455,6 +1495,7 @@ async def submit_leave(staff_id: int, request: Request, session: str | None = Co
 def approve_leave(req_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     q("UPDATE leave_requests SET status='approved', approved_by=?, approved_at=datetime('now') WHERE request_id=?",
       (user.get("username"), req_id))
     return RedirectResponse("/staff/leave-requests", status_code=303)
@@ -1464,6 +1505,7 @@ def approve_leave(req_id: int, session: str | None = Cookie(default=None)):
 def decline_leave(req_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     q("UPDATE leave_requests SET status='declined', approved_by=?, approved_at=datetime('now') WHERE request_id=?",
       (user.get("username"), req_id))
     return RedirectResponse("/staff/leave-requests", status_code=303)
@@ -1718,6 +1760,7 @@ async def save_entitlement(staff_id: int, request: Request,
                            session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     form        = await request.form()
     year        = int(form.get("year", datetime.now().year))
     custom_days = float(form.get("custom_days", 0) or 0)
@@ -1748,6 +1791,7 @@ def staff_documents(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
 
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
@@ -1862,6 +1906,7 @@ async def upload_staff_doc(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
 
     form     = await request.form()
     doc_type = form.get("doc_type","Other")
@@ -1986,6 +2031,7 @@ async def generate_doc(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
 
     form     = await request.form()
     doc_type = form.get("doc_type","")
@@ -2041,6 +2087,7 @@ async def generate_doc(
 def download_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=?",
              (doc_id, staff_id), fetch=True)
     if not rows: return HTMLResponse("<p>Document not found</p>", status_code=404)
@@ -2057,6 +2104,7 @@ def download_doc(staff_id: int, doc_id: int, session: str | None = Cookie(defaul
 def view_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=?",
              (doc_id, staff_id), fetch=True)
     if not rows: return HTMLResponse("<p>Document not found</p>", status_code=404)
@@ -2151,6 +2199,7 @@ def onboarding_overview(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
 
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
@@ -2260,6 +2309,7 @@ def onboarding_overview(
 def employment_application_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
 
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
@@ -2449,6 +2499,7 @@ async def save_employment_application(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     import json
     form   = await request.form()
     action = form.get("action","save")
@@ -2481,6 +2532,7 @@ async def save_employment_application(
 def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
     s    = dict(rows[0])
@@ -2613,6 +2665,7 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
 async def save_p46(staff_id: int, request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
     import json
     form   = await request.form()
     action = form.get("action","save")
@@ -2762,6 +2815,7 @@ async def save_new_employee_notify(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_mgr(user)): return r
     import json
     form   = await request.form()
     action = form.get("action","save")
@@ -2786,6 +2840,7 @@ async def upload_paper_form(
 ):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
 
     form      = await request.form()
     paper     = form.get("paper_form")
