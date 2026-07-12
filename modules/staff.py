@@ -959,10 +959,10 @@ DOC_TYPES = [
 
 
 def get_store_entity(store_name: str) -> dict:
-    """The legal entity a store trades as, read from the store_entities table
+    """The legal entity a store trades as, read from the company_entities table
     (never hardcoded) so a future change — e.g. the Uxbridge LLP being replaced
     by its Ltd partner — is a one-row edit that every generated document picks up."""
-    rows = q("SELECT * FROM store_entities WHERE store_name=?", (store_name or "",), fetch=True)
+    rows = q("SELECT * FROM company_entities WHERE store_name=?", (store_name or "",), fetch=True)
     if rows:
         return dict(rows[0])
     # Fallback keeps generation working even if a store has no entity row yet

@@ -93,7 +93,16 @@ def _parse_date(s: str):
 
 # Our own company never appears as the *supplier* — these invoices are billed
 # TO us, so any name containing this is the customer and must be ignored.
+# (New MAUKBs companies are still caught by "maukbs"; the Uxbridge LLP is the
+# only own-entity this misses, and it isn't billed for property expenses.)
 _OWN_COMPANY_HINTS = ("maukbs",)
+
+
+def entity_name(code: str, default: str = "") -> str:
+    """Legal name of one of our own companies, from the company_entities table
+    (single source of truth), so names/spelling stay consistent everywhere."""
+    rows = q("SELECT legal_name FROM company_entities WHERE entity_code=?", (code,), fetch=True)
+    return rows[0]["legal_name"] if rows else default
 
 # Label patterns: each captures any inline value after the label on the SAME
 # line; if that's empty we fall back to the value in the cell directly below
@@ -336,8 +345,8 @@ def ledger_options(user: dict) -> list[tuple]:
             opts.append((f"PROP:{p['short_name']}", f"🏠 {p['full_address']}"))
         # MREL = MAUKBs Real Estate Ltd: a company-level expenses ledger (not a
         # rental property), so it's added here rather than in the properties
-        # table — keeps it out of rental/mortgage reports.
-        opts.append(("PROP:MREL", "🏢 MAUKBs Real Estate Ltd (Company)"))
+        # table — keeps it out of rental/mortgage reports. Name from the entities table.
+        opts.append(("PROP:MREL", f"🏢 {entity_name('MREL', 'MAUKBs Real Estate Ltd')} (Company)"))
     elif role == "manager":
         opts += [("Uxbridge", "🏪 Uxbridge (Retail)"),
                  ("Newbury",  "🏪 Newbury (Retail)")]

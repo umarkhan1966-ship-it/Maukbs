@@ -264,22 +264,40 @@ def init_db():
         )
     """)
 
-    # ── Store legal entities (which company each store trades as) ──
-    # Kept in a table, NOT hardcoded, so a future entity change (e.g. the
-    # Uxbridge LLP being replaced by its Ltd partner) is a one-row edit and
-    # every generated contract/offer letter picks it up automatically.
+    # ── Company legal entities: ALL of Umar's own trading entities in ONE place ──
+    # Retail stores AND property companies. Every screen that shows a company name
+    # (contracts, offer letters, onboarding forms, the property ledger) reads from
+    # here, so adding a future MAUKBs company is a one-row change — spelled once,
+    # correct everywhere. Company name is always spelled "MAUKBs" (+ suffix).
     c.execute("""
-        CREATE TABLE IF NOT EXISTS store_entities (
-            store_name   TEXT PRIMARY KEY,   -- matches store_name used everywhere ('Uxbridge'/'Newbury')
-            legal_name   TEXT NOT NULL,       -- the legal company, e.g. 'MAUKBs Ltd'
-            trading_name TEXT,                -- 'trading as' name, e.g. 'Snappy Snaps Newbury'
+        CREATE TABLE IF NOT EXISTS company_entities (
+            entity_code  TEXT PRIMARY KEY,    -- stable code, e.g. 'NEWBURY','UXBRIDGE','MREL'
+            legal_name   TEXT NOT NULL,        -- the registered company, e.g. 'MAUKBs Ltd'
+            trading_name TEXT,                 -- 'trading as' name (NULL if none)
+            store_name   TEXT,                 -- links a retail entity to its store ('Newbury'/'Uxbridge'); NULL otherwise
+            kind         TEXT,                 -- 'retail' or 'property'
             addr_line1   TEXT,
             addr_line2   TEXT,
             addr_line3   TEXT,
-            addr_line4   TEXT,                -- postcode line
+            addr_line4   TEXT,                 -- postcode line
+            is_own       INTEGER DEFAULT 1,    -- 1 = our own company (ignored as a supplier when reading invoices)
             updated_at   TEXT DEFAULT (datetime('now'))
         )
     """)
+
+    # One-time carry-over from the earlier store_entities table, so any edits made
+    # there are preserved before it's dropped (retail entities become company rows).
+    _tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'store_entities' in _tables:
+        for r in c.execute("""SELECT store_name,legal_name,trading_name,
+                                     addr_line1,addr_line2,addr_line3,addr_line4
+                              FROM store_entities"""):
+            c.execute("""INSERT OR IGNORE INTO company_entities
+                (entity_code,legal_name,trading_name,store_name,kind,
+                 addr_line1,addr_line2,addr_line3,addr_line4,is_own)
+                VALUES (?,?,?,?, 'retail', ?,?,?,?, 1)""",
+                ((r[0] or '').upper(), r[1], r[2], r[0], r[3], r[4], r[5], r[6]))
+        c.execute("DROP TABLE store_entities")
 
     # ── Sessions (server-side login tokens) ──
     c.execute("""
@@ -310,18 +328,21 @@ def init_db():
             VALUES (?,?,?,?,?,?)
         """, (short, full, price, mort, m_mort, pdate))
 
-    # ── Seed the two store entities (INSERT OR IGNORE = existing rows kept) ──
-    for store, legal, trading, l1, l2, l3, l4 in [
-        ("Newbury",  "MAUKBs Ltd",                     "Snappy Snaps Newbury",
+    # ── Seed the known company entities (INSERT OR IGNORE = existing/carried-over rows kept) ──
+    for code, legal, trading, store, kind, l1, l2, l3, l4 in [
+        ("NEWBURY",  "MAUKBs Ltd",                      "Snappy Snaps Newbury",  "Newbury",  "retail",
          "95 Northbrook Street", "Newbury", "Berkshire", "RG14 1AA"),
-        ("Uxbridge", "Sappy Properties (Uxbridge) LLP", "Snappy Snaps Uxbridge",
+        ("UXBRIDGE", "Sappy Properties (Uxbridge) LLP", "Snappy Snaps Uxbridge", "Uxbridge", "retail",
          "178 High Street", "Uxbridge", "Middlesex", "UB8 1LA"),
+        ("MREL",     "MAUKBs Real Estate Ltd",          None,                    None,       "property",
+         None, None, None, None),
     ]:
         c.execute("""
-            INSERT OR IGNORE INTO store_entities
-                (store_name, legal_name, trading_name, addr_line1, addr_line2, addr_line3, addr_line4)
-            VALUES (?,?,?,?,?,?,?)
-        """, (store, legal, trading, l1, l2, l3, l4))
+            INSERT OR IGNORE INTO company_entities
+                (entity_code, legal_name, trading_name, store_name, kind,
+                 addr_line1, addr_line2, addr_line3, addr_line4)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (code, legal, trading, store, kind, l1, l2, l3, l4))
 
     # ── Lightweight migrations: add columns missing from older databases ──
     def ensure_columns(table, coldefs):
