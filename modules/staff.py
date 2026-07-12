@@ -563,7 +563,7 @@ async def upload_template(request: Request, session: str | None = Cookie(default
 
     q("UPDATE document_templates SET is_current=0 WHERE doc_type=?", (doc_type,))
 
-    filename = f"template_{doc_type.replace(' ','_')}_v{next_ver}.docx"
+    filename = f"template_{_safe_part(doc_type)}_v{next_ver}.docx"
     filepath = os.path.join(TEMPLATES_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(await tmpl.read())
@@ -2086,7 +2086,7 @@ async def generate_doc(
     q("UPDATE staff_documents SET is_current=0 WHERE staff_id=? AND doc_type=?",
       (staff_id, doc_type))
 
-    filename = f"staff_{staff_id}_{doc_type.replace(' ','_')}_v{next_ver}.docx"
+    filename = f"staff_{staff_id}_{_safe_part(doc_type)}_v{next_ver}.docx"
     filepath = os.path.join(DOCS_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(doc_bytes)
