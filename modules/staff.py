@@ -971,6 +971,28 @@ def get_store_entity(store_name: str) -> dict:
             "addr_line3": "", "addr_line4": ""}
 
 
+def employer_options(selected_val: str = "") -> str:
+    """Employer <option>s for onboarding dropdowns, built from company_entities
+    (retail stores) so the names match everywhere and a future company appears
+    automatically. Values/labels are HTML-escaped."""
+    rows = q("""SELECT legal_name, trading_name, store_name,
+                       addr_line1, addr_line2, addr_line3, addr_line4
+                FROM company_entities WHERE kind='retail' ORDER BY store_name""", fetch=True) or []
+    out = []
+    for r in rows:
+        r = dict(r)
+        addr    = ", ".join(x for x in [r["addr_line1"], r["addr_line2"], r["addr_line3"], r["addr_line4"]] if x)
+        trading = r["trading_name"] or ""
+        value   = f"{r['legal_name']} T/A {trading}, {addr}" if trading else f"{r['legal_name']}, {addr}"
+        label   = f"{trading or r['legal_name']} — {r['addr_line1']}, {r['store_name']} {r['addr_line4']}"
+        # match a previously-saved value by store or by the first word of the legal name
+        sel = "selected" if selected_val and (
+                r["store_name"] in selected_val
+                or r["legal_name"].split()[0] in selected_val) else ""
+        out.append(f"<option value='{esc(value)}' {sel}>{esc(label)}</option>")
+    return "".join(out)
+
+
 def get_merge_fields(staff: dict) -> dict:
     """Return all merge fields for Word template substitution.
     Supports both <<field>> (your existing format) and {{FIELD}} formats.
@@ -2392,8 +2414,8 @@ def onboarding_overview(
     {flash}
     <div class='flex justify-between items-center flex-wrap gap-3'>
       <div>
-        <a href='/staff/{staff_id}' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to {name}</a>
-        <div class='text-2xl font-black text-slate-800 mt-1'>📋 Onboarding — {name}</div>
+        <a href='/staff/{staff_id}' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to {esc(name)}</a>
+        <div class='text-2xl font-black text-slate-800 mt-1'>📋 Onboarding — {esc(name)}</div>
       </div>
     </div>
     {completion_bar}
@@ -2431,12 +2453,12 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
         v    = val if val is not None else fv(name)
         req_a = "required" if req else ""
         ph    = f"placeholder='{placeholder}'" if placeholder else ""
-        return f"<div><label>{label}</label><input type='{ftype}' name='{name}' value='{v}' {req_a} {ph}></div>"
+        return f"<div><label>{label}</label><input type='{ftype}' name='{name}' value='{esc(v)}' {req_a} {ph}></div>"
 
     content = f"""
     <div>
       <a href='/staff/{staff_id}/onboarding' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to Onboarding</a>
-      <div class='text-2xl font-black text-slate-800 mt-1'>Employment Application — {name}</div>
+      <div class='text-2xl font-black text-slate-800 mt-1'>Employment Application — {esc(name)}</div>
       <div style='font-size:13px;color:#64748b;margin-top:2px'>Snappy Snaps — Equal Opportunity Employer</div>
     </div>
 
@@ -2449,11 +2471,11 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
           {fi('full_name', 'Full Name', val=fv('full_name') or f"{s.get('first_name','')} {s.get('last_name','')}", req=True)}
           {fi('address',         'Address',               val=fv('address') or ', '.join(filter(None,[s.get('address_1',''),s.get('address_2',''),s.get('address_3',''),s.get('postcode','')])))}
           <div><label>Telephone No.</label>
-            <input type='text' name='phone' value='{fv("phone") or s.get("phone","")}'
+            <input type='text' name='phone' value='{esc(fv("phone") or s.get("phone",""))}'
               placeholder='01234 567890'>
           </div>
           <div><label>Mobile No. <span style="font-size:10px;color:#94a3b8;font-weight:400">(preferred format: 07700 123456)</span></label>
-            <input type='text' name='mobile' value='{fv("mobile")}'
+            <input type='text' name='mobile' value='{esc(fv("mobile"))}'
               placeholder='07700 123456'>
           </div>
           {fi('ni_number',       'National Insurance No.',placeholder='AB 12 34 56 C')}
@@ -2482,7 +2504,7 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
             <select name='skin_irritation'><option value='No'>No</option><option value='Yes' {'selected' if fv('skin_irritation')=='Yes' else ''}>Yes</option></select></div>
           <div style='grid-column:1/-1'>
             <label>Absence from work through illness in past 12 months</label>
-            <textarea name='illness_absence' rows='2' placeholder='Please give details if any'>{fv('illness_absence')}</textarea>
+            <textarea name='illness_absence' rows='2' placeholder='Please give details if any'>{esc(fv('illness_absence'))}</textarea>
           </div>
           <div><label>Do you smoke?</label>
             <select name='smoking'>
@@ -2498,13 +2520,13 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
         <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Educational History</div>
         <div class='grid gap-3' style='grid-template-columns:1fr'>
           <div><label>O Levels / GCSEs (subjects and grades)</label>
-            <textarea name='gcse' rows='2'>{fv('gcse')}</textarea></div>
+            <textarea name='gcse' rows='2'>{esc(fv('gcse'))}</textarea></div>
           <div><label>A Levels</label>
-            <textarea name='a_levels' rows='2'>{fv('a_levels')}</textarea></div>
+            <textarea name='a_levels' rows='2'>{esc(fv('a_levels'))}</textarea></div>
           <div><label>University / Degree</label>
-            <input type='text' name='university' value='{fv('university')}'></div>
+            <input type='text' name='university' value='{esc(fv('university'))}'></div>
           <div><label>Other Qualifications or Skills</label>
-            <textarea name='other_quals' rows='2'>{fv('other_quals')}</textarea></div>
+            <textarea name='other_quals' rows='2'>{esc(fv('other_quals'))}</textarea></div>
         </div>
       </div>
 
@@ -2512,17 +2534,17 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
         <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>General Information</div>
         <div class='grid gap-3' style='grid-template-columns:1fr'>
           <div><label>What do you seek most from this position?</label>
-            <textarea name='seeks' rows='2'>{fv('seeks')}</textarea></div>
+            <textarea name='seeks' rows='2'>{esc(fv('seeks'))}</textarea></div>
           <div><label>Where do you see yourself in 5 years?</label>
-            <textarea name='five_years' rows='2'>{fv('five_years')}</textarea></div>
+            <textarea name='five_years' rows='2'>{esc(fv('five_years'))}</textarea></div>
           <div><label>Interests and hobbies</label>
-            <textarea name='hobbies' rows='2'>{fv('hobbies')}</textarea></div>
+            <textarea name='hobbies' rows='2'>{esc(fv('hobbies'))}</textarea></div>
           <div><label>Greatest strengths</label>
-            <textarea name='strengths' rows='2'>{fv('strengths')}</textarea></div>
+            <textarea name='strengths' rows='2'>{esc(fv('strengths'))}</textarea></div>
           <div><label>Greatest weaknesses</label>
-            <textarea name='weaknesses' rows='2'>{fv('weaknesses')}</textarea></div>
+            <textarea name='weaknesses' rows='2'>{esc(fv('weaknesses'))}</textarea></div>
           <div><label>Any court convictions or outstanding hearings?</label>
-            <textarea name='convictions' rows='2' placeholder='Please declare if any'>{fv('convictions')}</textarea></div>
+            <textarea name='convictions' rows='2' placeholder='Please declare if any'>{esc(fv('convictions'))}</textarea></div>
           <div><label>Have you previously applied to or worked at Snappy Snaps?</label>
             <select name='prev_snappy'>
               <option value='No' {'selected' if fv('prev_snappy','No')=='No' else ''}>No</option>
@@ -2540,14 +2562,14 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
         <div style='border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:10px'>
           <div style='font-size:12px;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase'>Employer {i}</div>
           <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(200px,1fr))'>
-            <div><label>Employer Name</label><input type='text' name='emp{i}_name' value='{fv(f"emp{i}_name")}'></div>
-            <div><label>Address</label><input type='text' name='emp{i}_address' value='{fv(f"emp{i}_address")}'></div>
-            <div><label>Date Commenced</label><input type='date' name='emp{i}_start' value='{fv(f"emp{i}_start")}'></div>
-            <div><label>Date Left</label><input type='date' name='emp{i}_end' value='{fv(f"emp{i}_end")}'></div>
-            <div><label>Position</label><input type='text' name='emp{i}_position' value='{fv(f"emp{i}_position")}'></div>
-            <div><label>Salary</label><input type='text' name='emp{i}_salary' value='{fv(f"emp{i}_salary")}'></div>
+            <div><label>Employer Name</label><input type='text' name='emp{i}_name' value='{esc(fv(f"emp{i}_name"))}'></div>
+            <div><label>Address</label><input type='text' name='emp{i}_address' value='{esc(fv(f"emp{i}_address"))}'></div>
+            <div><label>Date Commenced</label><input type='date' name='emp{i}_start' value='{esc(fv(f"emp{i}_start"))}'></div>
+            <div><label>Date Left</label><input type='date' name='emp{i}_end' value='{esc(fv(f"emp{i}_end"))}'></div>
+            <div><label>Position</label><input type='text' name='emp{i}_position' value='{esc(fv(f"emp{i}_position"))}'></div>
+            <div><label>Salary</label><input type='text' name='emp{i}_salary' value='{esc(fv(f"emp{i}_salary"))}'></div>
             <div style='grid-column:1/-1'><label>Reason for leaving</label>
-              <input type='text' name='emp{i}_reason' value='{fv(f"emp{i}_reason")}'></div>
+              <input type='text' name='emp{i}_reason' value='{esc(fv(f"emp{i}_reason"))}'></div>
           </div>
         </div>"""
 
@@ -2563,8 +2585,8 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
           <div>
             <div style='font-size:12px;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase'>Reference {i}</div>
             <div class='space-y-2'>
-              <div><label>Name</label><input type='text' name='ref{i}_name' value='{fv(f"ref{i}_name")}'></div>
-              <div><label>Address</label><textarea name='ref{i}_address' rows='2'>{fv(f"ref{i}_address")}</textarea></div>
+              <div><label>Name</label><input type='text' name='ref{i}_name' value='{esc(fv(f"ref{i}_name"))}'></div>
+              <div><label>Address</label><textarea name='ref{i}_address' rows='2'>{esc(fv(f"ref{i}_address"))}</textarea></div>
             </div>
           </div>"""
 
@@ -2661,17 +2683,17 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
             <select name='title'>
               <option>Mr</option><option>Mrs</option><option>Miss</option><option>Ms</option><option>Dr</option>
             </select></div>
-          <div><label>Surname</label><input type='text' name='surname' value='{fv("surname", s.get("last_name",""))}' required></div>
-          <div><label>First Name(s)</label><input type='text' name='first_name' value='{fv("first_name", s.get("first_name",""))}' required></div>
+          <div><label>Surname</label><input type='text' name='surname' value='{esc(fv("surname", s.get("last_name","")))}' required></div>
+          <div><label>First Name(s)</label><input type='text' name='first_name' value='{esc(fv("first_name", s.get("first_name","")))}' required></div>
           <div><label>Gender</label>
             <select name='gender'>
               <option value='Male' {'selected' if fv('gender','Male')=='Male' else ''}>Male</option>
               <option value='Female' {'selected' if fv('gender')=='Female' else ''}>Female</option>
             </select></div>
-          <div><label>Date of Birth</label><input type='date' name='dob' value='{fv("dob", s.get("date_of_birth",""))}' required></div>
-          <div><label>National Insurance Number</label><input type='text' name='nino' value='{fv("nino")}' placeholder='AB 12 34 56 C' required></div>
+          <div><label>Date of Birth</label><input type='date' name='dob' value='{esc(fv("dob", s.get("date_of_birth","")))}' required></div>
+          <div><label>National Insurance Number</label><input type='text' name='nino' value='{esc(fv("nino"))}' placeholder='AB 12 34 56 C' required></div>
           <div style='grid-column:1/-1'><label>Address</label>
-            <input type='text' name='address' value='{fv("address", ", ".join(filter(None,[s.get("address_1",""),s.get("address_2",""),s.get("address_3",""),s.get("postcode","")])))}'></div>
+            <input type='text' name='address' value='{esc(fv("address", ", ".join(filter(None,[s.get("address_1",""),s.get("address_2",""),s.get("address_3",""),s.get("postcode","")]))))}'></div>
         </div>
       </div>
       <div class='card'>
@@ -2703,7 +2725,7 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
           Declaration: I confirm that this information is correct.
         </div>
         <div class='grid gap-3' style='grid-template-columns:1fr 1fr'>
-          <div><label>Date</label><input type='date' name='sign_date' value='{fv("sign_date")}' required></div>
+          <div><label>Date</label><input type='date' name='sign_date' value='{esc(fv("sign_date"))}' required></div>
         </div>
       </div>
 
@@ -2713,26 +2735,19 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
         <div style='font-size:12px;color:#94a3b8;margin-bottom:12px'>Owner only — not visible to staff</div>
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(220px,1fr))'>
           <div><label>Employer Name &amp; Address</label>
-            <select name='s2_employer'>
-              <option value='Sappy Properties (Uxbridge) Llp T/A Snappy Snaps, 178 High Street, Uxbridge, Middlesex, UB8 1LA' {'selected' if fv('s2_employer','').startswith('Sappy') else ''}>
-                Snappy Snaps Uxbridge — 178 High Street, Uxbridge UB8 1LA
-              </option>
-              <option value='MAUKBs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA' {'selected' if fv('s2_employer','').startswith('MAUKBs') else ''}>
-                Snappy Snaps Newbury — 95 Northbrook Street, Newbury RG14 1AA
-              </option>
-            </select>
+            <select name='s2_employer'>{employer_options(fv('s2_employer',''))}</select>
           </div>
           <div><label>Date Employment Started</label>
-            <input type='date' name='s2_start_date' value='{fv("s2_start_date") or s.get("date_joined","")}'></div>
+            <input type='date' name='s2_start_date' value='{esc(fv("s2_start_date") or s.get("date_joined",""))}'></div>
           <div><label>Job Title</label>
-            <input type='text' name='s2_job_title' value='{fv("s2_job_title") or s.get("job_title","")}'
+            <input type='text' name='s2_job_title' value='{esc(fv("s2_job_title") or s.get("job_title",""))}'
               placeholder='e.g. Sales Assistant'></div>
           <div><label>Works/Payroll Number</label>
-            <input type='text' name='s2_payroll_no' value='{fv("s2_payroll_no")}' placeholder='e.g. P001'></div>
+            <input type='text' name='s2_payroll_no' value='{esc(fv("s2_payroll_no"))}' placeholder='e.g. P001'></div>
           <div><label>Employer PAYE Reference</label>
-            <input type='text' name='s2_paye_ref' value='{fv("s2_paye_ref")}' placeholder='e.g. 123/AB456'></div>
+            <input type='text' name='s2_paye_ref' value='{esc(fv("s2_paye_ref"))}' placeholder='e.g. 123/AB456'></div>
           <div><label>Tax Code Used</label>
-            <input type='text' name='s2_tax_code' value='{fv("s2_tax_code")}' placeholder='e.g. 1257L'></div>
+            <input type='text' name='s2_tax_code' value='{esc(fv("s2_tax_code"))}' placeholder='e.g. 1257L'></div>
         </div>
         <div style='margin-top:12px'>
           <div style='font-size:12px;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase'>Tax Code Basis</div>
@@ -2807,12 +2822,12 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
     def fi(nm, lbl, ft="text", val=None, ph=""):
         v  = val if val is not None else fv(nm)
         ph = f"placeholder='{ph}'" if ph else ""
-        return f"<div><label>{lbl}</label><input type='{ft}' name='{nm}' value='{v}' {ph}></div>"
+        return f"<div><label>{lbl}</label><input type='{ft}' name='{nm}' value='{esc(v)}' {ph}></div>"
 
     content = f"""
     <div>
       <a href='/staff/{staff_id}/onboarding' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to Onboarding</a>
-      <div class='text-2xl font-black text-slate-800 mt-1'>New Employee Notification — {name}</div>
+      <div class='text-2xl font-black text-slate-800 mt-1'>New Employee Notification — {esc(name)}</div>
       <div style='font-size:12px;color:#94a3b8;margin-top:2px'>Owner only — not visible to staff</div>
     </div>
     <form action='/staff/{staff_id}/onboarding/new_employee_notify' method='POST' class='space-y-6'>
@@ -2837,14 +2852,7 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
         <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Employment Details (Employer)</div>
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(220px,1fr))'>
           <div><label>Employer Name & Address</label>
-            <select name='employer_name'>
-              <option value='Sappy Properties (Uxbridge) Llp T/A Snappy Snaps, 178 High Street, Uxbridge, Middlesex, UB8 1LA' {'selected' if "Uxbridge" in fv("employer_name","") else ""}>
-                Snappy Snaps Uxbridge — 178 High Street, Uxbridge, Middlesex UB8 1LA
-              </option>
-              <option value='MAUKBs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA' {'selected' if "Newbury" in fv("employer_name","") else ""}>
-                Snappy Snaps Newbury — 95 Northbrook Street, Newbury, Berkshire RG14 1AA
-              </option>
-            </select>
+            <select name='employer_name'>{employer_options(fv('employer_name',''))}</select>
           </div>
           <div><label>Pay Frequency</label>
             <select name='pay_frequency'>
