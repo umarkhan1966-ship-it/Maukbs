@@ -264,6 +264,23 @@ def init_db():
         )
     """)
 
+    # ── Store legal entities (which company each store trades as) ──
+    # Kept in a table, NOT hardcoded, so a future entity change (e.g. the
+    # Uxbridge LLP being replaced by its Ltd partner) is a one-row edit and
+    # every generated contract/offer letter picks it up automatically.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS store_entities (
+            store_name   TEXT PRIMARY KEY,   -- matches store_name used everywhere ('Uxbridge'/'Newbury')
+            legal_name   TEXT NOT NULL,       -- the legal company, e.g. 'Maukbs Ltd'
+            trading_name TEXT,                -- 'trading as' name, e.g. 'Snappy Snaps Newbury'
+            addr_line1   TEXT,
+            addr_line2   TEXT,
+            addr_line3   TEXT,
+            addr_line4   TEXT,                -- postcode line
+            updated_at   TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     # ── Sessions (server-side login tokens) ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -292,6 +309,19 @@ def init_db():
                 (short_name, full_address, purchase_price, mortgage, monthly_mortgage, purchase_date)
             VALUES (?,?,?,?,?,?)
         """, (short, full, price, mort, m_mort, pdate))
+
+    # ── Seed the two store entities (INSERT OR IGNORE = existing rows kept) ──
+    for store, legal, trading, l1, l2, l3, l4 in [
+        ("Newbury",  "Maukbs Ltd",                     "Snappy Snaps Newbury",
+         "95 Northbrook Street", "Newbury", "Berkshire", "RG14 1AA"),
+        ("Uxbridge", "Sappy Properties (Uxbridge) LLP", "Snappy Snaps Uxbridge",
+         "178 High Street", "Uxbridge", "Middlesex", "UB8 1LA"),
+    ]:
+        c.execute("""
+            INSERT OR IGNORE INTO store_entities
+                (store_name, legal_name, trading_name, addr_line1, addr_line2, addr_line3, addr_line4)
+            VALUES (?,?,?,?,?,?,?)
+        """, (store, legal, trading, l1, l2, l3, l4))
 
     # ── Lightweight migrations: add columns missing from older databases ──
     def ensure_columns(table, coldefs):

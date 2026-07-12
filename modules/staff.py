@@ -958,10 +958,17 @@ DOC_TYPES = [
 ]
 
 
-STORE_ADDRESSES = {
-    "Uxbridge": "Sappy Properties (Uxbridge) Llp T/A Snappy Snaps, 178 High Street, Uxbridge, Middlesex, UB8 1LA",
-    "Newbury":  "Maukbs Ltd T/A Snappy Snaps, 95 Northbrook Street, Newbury, Berkshire, RG14 1AA",
-}
+def get_store_entity(store_name: str) -> dict:
+    """The legal entity a store trades as, read from the store_entities table
+    (never hardcoded) so a future change — e.g. the Uxbridge LLP being replaced
+    by its Ltd partner — is a one-row edit that every generated document picks up."""
+    rows = q("SELECT * FROM store_entities WHERE store_name=?", (store_name or "",), fetch=True)
+    if rows:
+        return dict(rows[0])
+    # Fallback keeps generation working even if a store has no entity row yet
+    return {"store_name": store_name, "legal_name": store_name or "the Company",
+            "trading_name": "", "addr_line1": "", "addr_line2": "",
+            "addr_line3": "", "addr_line4": ""}
 
 
 def get_merge_fields(staff: dict) -> dict:
@@ -971,7 +978,13 @@ def get_merge_fields(staff: dict) -> dict:
     today    = datetime.now().strftime("%d %B %Y")
     name     = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip()
     store    = staff.get('store_name','')
-    store_addr = STORE_ADDRESSES.get(store, store)
+    ent      = get_store_entity(store)
+    employer      = (f"{ent['legal_name']} T/A {ent['trading_name']}"
+                     if ent.get('trading_name') else ent['legal_name'])
+    store_lines   = [ent.get('addr_line1'), ent.get('addr_line2'),
+                     ent.get('addr_line3'), ent.get('addr_line4')]
+    store_addr    = ", ".join(x for x in store_lines if x)   # postal address, one line
+    employer_addr = f"{employer}, {store_addr}" if store_addr else employer
     hrs      = staff.get('contracted_hrs') or 0
     rate     = staff.get('hourly_rate') or 0
     emp_type = staff.get('employment_type') or ('Full-time' if hrs >= 30 else 'Part-time')
@@ -993,21 +1006,29 @@ def get_merge_fields(staff: dict) -> dict:
         "<<address line 4>>":          staff.get('address_4','') or '',
         "<<post code>>":               staff.get('postcode','') or '',
         "<<today's date>>":            today,
+        "<<today’s date>>":       today,   # templates use a curly apostrophe
         "<<position>>":                job_title,
+        "<<Position>>":                job_title,   # offer-letter template capitalises it
         "<<FT or PT>>":                emp_type,
         "<<salary or hourly>>":        pay_type,
         "<<wages>>":                   wages,
-        "<<employer>>":                "Maukbs Ltd T/A Snappy Snaps",
-        "<<employer and store address>>": store_addr,
+        "<<employer>>":                employer,
+        "<<employer and store address>>": employer_addr,
         "<<store address>>":           store_addr,
         "<<s tore address >>":         store_addr,
+        "<<store address line 1>>":    ent.get('addr_line1','') or '',
+        "<<store address line 2>>":    ent.get('addr_line2','') or '',
+        "<<store address line 3>>":    ent.get('addr_line3','') or '',
+        "<<store address line 4>>":    ent.get('addr_line4','') or '',
         "<<reporting to>>":            reports_to,
         "<<contracted hours>>":        f"{hrs} hours per week",
+        "<<hours of work>>":           f"{hrs} hours per week",   # contract template token
         "<<hourly rate>>":             f"£{rate:.2f}",
         "<<date of joining>>":         staff.get('date_joined','') or '',
+        "<<DOJ>>":                     staff.get('date_joined','') or '',   # contract template token
         "<<date of birth>>":           staff.get('date_of_birth','') or '',
         "<<p osition>>":               job_title,
-        "<<e mployer>>":               "Maukbs Ltd T/A Snappy Snaps",
+        "<<e mployer>>":               employer,
     }
     fields.update(angle)
 
