@@ -354,6 +354,14 @@ def init_db():
         ("updated_at",           "updated_at TEXT"),
         ("claimable_vat",        "claimable_vat REAL"),
     ])
+    ensure_columns("staff_profiles", [
+        # These were collected on the edit form but never persisted (chat build) —
+        # so contracts always fell back to defaults. Now stored per staff member.
+        ("job_title",       "job_title TEXT"),
+        ("employment_type", "employment_type TEXT"),
+        ("reports_to",      "reports_to TEXT"),
+        ("notice_period",   "notice_period TEXT"),   # e.g. '1 week', '12 weeks' — per person, as Umar tracks in Excel
+    ])
     ensure_columns("supplier_terms", [
         ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit
         ("vat_reclaim_pct", "vat_reclaim_pct INTEGER"),   # NULL/100 = fully reclaimable; e.g. 50 for company-car leases

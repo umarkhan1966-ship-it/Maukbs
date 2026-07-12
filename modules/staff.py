@@ -1021,6 +1021,7 @@ def get_merge_fields(staff: dict) -> dict:
         "<<store address line 3>>":    ent.get('addr_line3','') or '',
         "<<store address line 4>>":    ent.get('addr_line4','') or '',
         "<<reporting to>>":            reports_to,
+        "<<notice period>>":           staff.get('notice_period','') or '',
         "<<contracted hours>>":        f"{hrs} hours per week",
         "<<hours of work>>":           f"{hrs} hours per week",   # contract template token
         "<<hourly rate>>":             f"£{rate:.2f}",
@@ -1341,6 +1342,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
         {fi('job_title','Job Title','text',sv.get('job_title',''),placeholder='e.g. Sales Assistant')}
         {fi('employment_type','Employment Type',opts=[('Full-time','Full-time'),('Part-time','Part-time')],val=sv.get('employment_type','Part-time'))}
         {fi('reports_to','Reports To','text',sv.get('reports_to',''),placeholder='e.g. Store Manager')}
+        {fi('notice_period','Notice Period','text',sv.get('notice_period',''),placeholder='e.g. 1 week, 12 weeks')}
         {fi('date_joined','Date Joined','date',sv.get('date_joined'))}
         {fi('contracted_hrs','Contracted Hours/Week','number',sv.get('contracted_hrs'),placeholder='e.g. 37.5')}
         {fi('hourly_rate','Hourly Rate (£)','number',sv.get('hourly_rate'),placeholder='e.g. 11.44')}
@@ -1385,15 +1387,18 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
     q("""INSERT INTO staff_profiles
         (staff_number,first_name,last_name,store_name,sex,phone,email,
          address_1,address_2,address_3,postcode,date_joined,date_of_birth,
-         contracted_hrs,hourly_rate,is_salaried,salary_amount,is_active)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         contracted_hrs,hourly_rate,is_salaried,salary_amount,is_active,
+         job_title,employment_type,reports_to,notice_period)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (form.get("staff_number") or None, fv("first_name"), fv("last_name"),
        fv("store_name"), fv("sex"), fv("phone"), fv("email"),
        fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
        fv("date_joined") or None, fv("date_of_birth") or None,
        fn("contracted_hrs"), fn("hourly_rate"),
        fv("is_salaried","N"), fn("salary_amount"),
-       int(form.get("is_active", 1))))
+       int(form.get("is_active", 1)),
+       fv("job_title") or None, fv("employment_type") or None,
+       fv("reports_to") or None, fv("notice_period") or None))
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff?msg={uq('Staff member added successfully')}", status_code=303)
 
@@ -1413,7 +1418,8 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
             staff_number=?,first_name=?,last_name=?,store_name=?,sex=?,
             phone=?,email=?,address_1=?,address_2=?,address_3=?,postcode=?,
             date_joined=?,date_of_birth=?,contracted_hrs=?,hourly_rate=?,
-            is_salaried=?,salary_amount=?,is_active=?,date_left=?,leaving_reason=?
+            is_salaried=?,salary_amount=?,is_active=?,date_left=?,leaving_reason=?,
+            job_title=?,employment_type=?,reports_to=?,notice_period=?
             WHERE staff_id=?""",
           (form.get("staff_number") or None, fv("first_name"), fv("last_name"),
            fv("store_name"), fv("sex"), fv("phone"), fv("email"),
@@ -1423,6 +1429,8 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
            fv("is_salaried","N"), fn("salary_amount"),
            int(form.get("is_active",1)),
            fv("date_left") or None, fv("leaving_reason") or None,
+           fv("job_title") or None, fv("employment_type") or None,
+           fv("reports_to") or None, fv("notice_period") or None,
            staff_id))
     else:
         # Staff can only update personal contact details
