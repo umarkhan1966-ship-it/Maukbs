@@ -1938,6 +1938,39 @@ async def save_entitlement(staff_id: int, request: Request,
                             status_code=303)
 
 
+def _doc_kind(path: str) -> str:
+    """Human label for a document's file type, from its extension."""
+    ext = os.path.splitext(path or "")[1].lower()
+    return {".pdf": "PDF", ".jpg": "Image", ".jpeg": "Image", ".png": "Image",
+            ".docx": "Word", ".doc": "Word", ".dotx": "Word"}.get(ext, (ext.lstrip(".").upper() or "File"))
+
+
+def _kind_chip(path: str) -> str:
+    kind = _doc_kind(path)
+    bg, fg = {"PDF": ("#fee2e2", "#991b1b"), "Word": ("#dbeafe", "#1d4ed8"),
+              "Image": ("#dcfce7", "#166534")}.get(kind, ("#f1f5f9", "#64748b"))
+    return (f"<span style='background:{bg};color:{fg};font-size:10px;font-weight:700;"
+            f"padding:2px 6px;border-radius:4px'>{kind}</span>")
+
+
+def _doc_action_buttons(staff_id: int, d: dict, is_owner: bool, small: bool = False) -> str:
+    """View (PDFs/images only — Word can't preview in a browser) + Download + owner-only Delete."""
+    pad  = "3px 8px" if small else "4px 10px"
+    kind = _doc_kind(d["file_path"])
+    btns = ""
+    if kind in ("PDF", "Image"):
+        btns += (f"<a href='/staff/{staff_id}/documents/{d['doc_id']}/view' target='_blank' "
+                 f"class='btn-secondary' style='padding:{pad};font-size:11px'>👁 View</a>")
+    btns += (f"<a href='/staff/{staff_id}/documents/{d['doc_id']}/download' "
+             f"class='btn-secondary' style='padding:{pad};font-size:11px'>⬇️ Download</a>")
+    if is_owner:
+        btns += (f"<form method='POST' action='/staff/{staff_id}/documents/{d['doc_id']}/delete' "
+                 f"style='display:inline' onsubmit=\"return confirm('Delete v{d['version']} of "
+                 f"{d['doc_type']}? This cannot be undone.');\">"
+                 f"<button type='submit' class='btn-danger' style='padding:{pad};font-size:11px'>🗑 Delete</button></form>")
+    return btns
+
+
 @router.get("/staff/{staff_id}/documents", response_class=HTMLResponse)
 def staff_documents(
     staff_id: int,
@@ -1953,6 +1986,7 @@ def staff_documents(
     if not rows: return RedirectResponse("/staff", status_code=303)
     s    = dict(rows[0])
     name = f"{s['first_name']} {s['last_name']}"
+    is_owner = user["role"] == "owner"
 
     # Get all documents for this staff member
     docs = q("""SELECT * FROM staff_documents WHERE staff_id=?
@@ -1989,15 +2023,12 @@ def staff_documents(
             <div style='background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
               <div>
                 <div style='font-size:13px;font-weight:700;color:#166534'>
-                  ✅ v{current['version']} — {current['uploaded_at'][:10]} {gen_badge}
+                  ✅ v{current['version']} — {current['uploaded_at'][:10]} {_kind_chip(current['file_path'])} {gen_badge}
                 </div>
                 <div style='font-size:11px;color:#64748b'>{current.get('notes') or ''}</div>
               </div>
-              <div style='display:flex;gap:6px'>
-                <a href='/staff/{staff_id}/documents/{current["doc_id"]}/download'
-                   class='btn-secondary' style='padding:4px 10px;font-size:11px'>⬇️ Download</a>
-                <a href='/staff/{staff_id}/documents/{current["doc_id"]}/view'
-                   class='btn-secondary' style='padding:4px 10px;font-size:11px' target='_blank'>👁 View</a>
+              <div style='display:flex;gap:6px;flex-wrap:wrap'>
+                {_doc_action_buttons(staff_id, current, is_owner)}
               </div>
             </div>"""
 
@@ -2006,10 +2037,9 @@ def staff_documents(
             older_html = "<div style='margin-top:6px'>"
             for od in older:
                 older_html += f"""
-                <div style='display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:12px;color:#64748b;border-bottom:1px solid #f1f5f9'>
-                  <span>v{od['version']} — {od['uploaded_at'][:10]}</span>
-                  <a href='/staff/{staff_id}/documents/{od["doc_id"]}/download'
-                     style='color:#1e3a5f;font-weight:700;font-size:11px'>⬇️ Download</a>
+                <div style='display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:12px;color:#64748b;border-bottom:1px solid #f1f5f9;gap:8px;flex-wrap:wrap'>
+                  <span>v{od['version']} — {od['uploaded_at'][:10]} {_kind_chip(od['file_path'])}</span>
+                  <span style='display:flex;gap:6px;flex-wrap:wrap'>{_doc_action_buttons(staff_id, od, is_owner, small=True)}</span>
                 </div>"""
             older_html += "</div>"
 
@@ -2282,6 +2312,38 @@ def view_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=No
              ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
              ".doc":  "application/msword"}.get(ext, "application/octet-stream")
     return FileResponse(d["file_path"], media_type=media)
+
+
+@router.post("/staff/{staff_id}/documents/{doc_id}/delete")
+def delete_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=None)):
+    """Delete one filed document version. Owner-only + version-aware: if the
+    deleted version was the current one, the next-highest version of that type
+    is promoted back to current so the record is never left in a broken state."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Only+the+owner+can+delete+documents&msg_type=error",
+                                status_code=303)
+    rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=?", (doc_id, staff_id), fetch=True)
+    if not rows:
+        return RedirectResponse(f"/staff/{staff_id}/documents", status_code=303)
+    d = dict(rows[0])
+    # remove the file from disk (best-effort), then the DB row
+    try:
+        if d["file_path"] and os.path.exists(d["file_path"]):
+            os.remove(d["file_path"])
+    except Exception:
+        pass
+    q("DELETE FROM staff_documents WHERE doc_id=?", (doc_id,))
+    # if we removed the current version, promote the newest remaining one of this type
+    if d["is_current"]:
+        rem = q("""SELECT doc_id FROM staff_documents WHERE staff_id=? AND doc_type=?
+                   ORDER BY version DESC LIMIT 1""", (staff_id, d["doc_type"]), fetch=True)
+        if rem:
+            q("UPDATE staff_documents SET is_current=1 WHERE doc_id=?", (dict(rem[0])["doc_id"],))
+    from urllib.parse import quote as uq
+    return RedirectResponse(
+        f"/staff/{staff_id}/documents?msg={uq('Document deleted')}", status_code=303)
 
 
 def ensure_onboarding_tables():
