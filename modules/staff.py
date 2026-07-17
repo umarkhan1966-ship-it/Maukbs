@@ -2645,7 +2645,7 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
 
       <div style='display:flex;gap:8px'>
         <button type='submit' name='action' value='save' class='btn-secondary'>💾 Save Progress</button>
-        <button type='submit' name='action' value='complete' class='btn-primary'>✅ Submit & Generate PDF</button>
+        <button type='submit' name='action' value='complete' class='btn-primary'>✅ Submit</button>
         <a href='/staff/{staff_id}/onboarding' class='btn-secondary'>Cancel</a>
       </div>
     </form>"""
@@ -3029,6 +3029,24 @@ async def upload_paper_form(
     return RedirectResponse(
         f"/staff/{staff_id}/onboarding?msg={uq('Paper form uploaded and marked complete')}",
         status_code=303)
+
+
+@router.get("/staff/{staff_id}/onboarding/{form_type}/pdf")
+def onboarding_form_file(staff_id: int, form_type: str, session: str | None = Cookie(default=None)):
+    """Serve the uploaded signed copy of an onboarding form so it can be reviewed.
+    (The checklist links here whenever a form has an uploaded file.)"""
+    redir, user = require_login(session)
+    if redir: return redir
+    if (r := _staff_access_guard(user, staff_id)): return r
+    rows = q("SELECT pdf_path FROM onboarding_forms WHERE staff_id=? AND form_type=?",
+             (staff_id, form_type), fetch=True)
+    path = dict(rows[0])["pdf_path"] if rows else None
+    if not path or not os.path.exists(path):
+        return HTMLResponse("<p>No uploaded file for this form.</p>", status_code=404)
+    ext   = os.path.splitext(path)[1].lower()
+    media = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".png": "image/png"}.get(ext, "application/octet-stream")
+    return FileResponse(path, media_type=media)
 
 
 ensure_staff_tables()
