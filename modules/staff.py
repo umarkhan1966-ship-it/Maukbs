@@ -896,7 +896,10 @@ def get_nmw_for_person(dob_str: str, check_date: str = None) -> float:
     try:
         dob  = datetime.strptime(dob_str, "%Y-%m-%d")
         chk  = datetime.strptime(check_date, "%Y-%m-%d")
-        age  = (chk - dob).days // 365
+        # exact age: subtract a year if this year's birthday hasn't happened yet
+        # (days//365 drifts with leap years and can tip someone into the next
+        #  NMW bracket a few days early — the 21 boundary is a big rate jump)
+        age  = chk.year - dob.year - ((chk.month, chk.day) < (dob.month, dob.day))
         # Get most recent NMW rates effective on or before check_date
         rates = q("""SELECT * FROM nmw_rates WHERE effective_date <= ?
                      ORDER BY effective_date DESC LIMIT 1""",
@@ -941,7 +944,11 @@ def pay_overview(session: str | None = Cookie(default=None)):
             status = f"<span class='badge-paid'>✅ +£{diff:.2f}</span>"
 
         dob = s.get("date_of_birth","")
-        age = ((datetime.now() - datetime.strptime(dob,"%Y-%m-%d")).days//365) if dob else "?"
+        if dob:
+            _d = datetime.strptime(dob, "%Y-%m-%d"); _t = datetime.now()
+            age = _t.year - _d.year - ((_t.month, _t.day) < (_d.month, _d.day))
+        else:
+            age = "?"
         rows_html += f"""<tr>
           <td style='font-weight:700'>{esc(s['first_name'])} {esc(s['last_name'])}</td>
           <td style='font-size:12px;color:#64748b'>{esc(s.get('store_name',''))}</td>
