@@ -1045,6 +1045,10 @@ def get_merge_fields(staff: dict) -> dict:
     store_addr    = ", ".join(x for x in store_lines if x)   # postal address, one line
     employer_addr = f"{employer}, {store_addr}" if store_addr else employer
     hrs      = staff.get('contracted_hrs') or 0
+    try:                                   # show "20 hours" not "20.0 hours"
+        hrs_txt = int(hrs) if float(hrs).is_integer() else hrs
+    except Exception:
+        hrs_txt = hrs
     rate     = staff.get('hourly_rate') or 0
     emp_type = staff.get('employment_type') or ('Full-time' if hrs >= 30 else 'Part-time')
     pay_type = 'salary' if staff.get('is_salaried') == 'Y' else 'hourly rate of'
@@ -1081,8 +1085,8 @@ def get_merge_fields(staff: dict) -> dict:
         "<<store address line 4>>":    ent.get('addr_line4','') or '',
         "<<reporting to>>":            reports_to,
         "<<notice period>>":           staff.get('notice_period','') or '',
-        "<<contracted hours>>":        f"{hrs} hours per week",
-        "<<hours of work>>":           f"{hrs} hours per week",   # contract template token
+        "<<contracted hours>>":        f"{hrs_txt} hours per week",
+        "<<hours of work>>":           f"{hrs_txt} hours per week",   # contract template token
         "<<hourly rate>>":             f"£{rate:.2f}",
         "<<date of joining>>":         staff.get('date_joined','') or '',
         "<<DOJ>>":                     staff.get('date_joined','') or '',   # contract template token
