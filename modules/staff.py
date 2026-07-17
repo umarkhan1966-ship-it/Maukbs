@@ -2273,7 +2273,15 @@ def view_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=No
     d = dict(rows[0])
     if not os.path.exists(d["file_path"]):
         return HTMLResponse("<p>File not found on disk</p>", status_code=404)
-    return FileResponse(d["file_path"], media_type="application/pdf")
+    # Serve with the file's REAL type: PDFs/images preview inline in the browser;
+    # Word docs (.docx) can't preview inline, so they open/download in Word. Forcing
+    # application/pdf on a .docx is what made the viewer fail with "Failed to load PDF".
+    ext   = os.path.splitext(d["file_path"])[1].lower()
+    media = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".png": "image/png",
+             ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+             ".doc":  "application/msword"}.get(ext, "application/octet-stream")
+    return FileResponse(d["file_path"], media_type=media)
 
 
 def ensure_onboarding_tables():
