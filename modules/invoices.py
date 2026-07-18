@@ -2414,8 +2414,8 @@ def dd_collection(session: str | None = Cookie(default=None),
       <iframe id="ddPdfFrame" src="" style="flex:1;width:100%;border:none"></iframe>
     </div>
     <script>
-    function ddShowPdf(u){var p=document.getElementById('ddPdfPanel');document.getElementById('ddPdfFrame').src=u;p.style.display='flex';}
-    function ddClosePdf(){var p=document.getElementById('ddPdfPanel');p.style.display='none';document.getElementById('ddPdfFrame').src='';}
+    function ddShowPdf(u){var p=document.getElementById('ddPdfPanel');document.getElementById('ddPdfFrame').src=u;p.style.display='flex';var m=document.getElementById('ddMain');if(m)m.style.marginRight='47%';}
+    function ddClosePdf(){var p=document.getElementById('ddPdfPanel');p.style.display='none';document.getElementById('ddPdfFrame').src='';var m=document.getElementById('ddMain');if(m)m.style.marginRight='0';}
     </script>"""
     # Auto-open the statement (side-by-side) right after it's attached.
     auto_open = ""
@@ -2427,17 +2427,19 @@ def dd_collection(session: str | None = Cookie(default=None),
                          f"ddShowPdf('/invoices/dd-collection/statement/{dict(_s[0])['dd_id']}');}});</script>")
 
     content = f"""
-    {flash}
-    <div class='flex justify-between items-center'>
-      <div class='text-2xl font-black text-slate-800'>🏦 DD Collection Check</div>
-      <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+    <div id="ddMain" style="transition:margin-right .2s ease">
+      {flash}
+      <div class='flex justify-between items-center'>
+        <div class='text-2xl font-black text-slate-800'>🏦 DD Collection Check</div>
+        <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
+      </div>
+      <div class='card' style='margin-top:12px'>
+        <div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>
+          Which store's DD statement are you reconciling?</div>
+        {store_btns}
+      </div>
+      {body}
     </div>
-    <div class='card' style='margin-top:12px'>
-      <div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>
-        Which store's DD statement are you reconciling?</div>
-      {store_btns}
-    </div>
-    {body}
     {dd_panel}{auto_open}"""
     return page("DD Collection Check", content, user, "invoices")
 
