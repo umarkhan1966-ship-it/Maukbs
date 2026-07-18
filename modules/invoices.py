@@ -2244,9 +2244,21 @@ def dd_collection(session: str | None = Cookie(default=None),
                       f"{fmt_uk_date(r['d'])} · {r['n']} inv · £{(r['tot'] or 0):,.2f}</a>")
         if not chips:
             chips = f"<span style='color:#94a3b8;font-size:13px'>No unpaid {store} invoices have a DD statement date.</span>"
+        # Reconciled collections (a statement is on file) — clickable to review later
+        recon = q("SELECT DISTINCT dd_date FROM dd_statements WHERE store_name=? ORDER BY dd_date DESC",
+                  (store,), fetch=True) or []
+        rchips = ""
+        for r in recon:
+            selc = ("background:#0f2942;color:white" if r["dd_date"] == dd_date
+                    else "background:#f1f5f9;color:#475569;border:1px solid #cbd5e1")
+            rchips += (f"<a href='/invoices/dd-collection?store={store}&dd_date={r['dd_date']}' "
+                       f"style='{selc};border-radius:8px;padding:5px 11px;margin:3px;font-size:12px;"
+                       f"font-weight:700;text-decoration:none;display:inline-block'>📄 {fmt_uk_date(r['dd_date'])}</a>")
+        recon_html = (f"<div style='margin-top:12px;font-size:12px;font-weight:700;color:#64748b'>"
+                      f"Reconciled (statement on file — click to review):</div>{rchips}") if rchips else ""
         picker = (f"<div class='card' style='margin-top:12px'>"
                   f"<div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>"
-                  f"{store} — pick a DD statement date to reconcile:</div>{chips}</div>")
+                  f"{store} — pick a DD statement date to reconcile:</div>{chips}{recon_html}</div>")
 
         detail = ""
         if dd_date:
@@ -2349,8 +2361,43 @@ def dd_collection(session: str | None = Cookie(default=None),
                 document.addEventListener('DOMContentLoaded',ddCalc);
                 </script>"""
             else:
-                detail = ("<div class='card' style='margin-top:14px;color:#64748b'>"
-                          f"No unpaid {store} invoices remain for DD statement {fmt_uk_date(dd_date)} — all settled. ✅</div>")
+                # Reconciled (all paid) — read-only review, with the statement to view.
+                paid = q(f"""SELECT seq_no, supplier_name, invoice_number, paid_date,
+                                    COALESCE(amount_paid,0) AS amt
+                             FROM supplier_invoices
+                             WHERE store_name=? AND dd_statement_date=? AND is_paid='Yes'
+                             ORDER BY supplier_name, seq_no""", (store, dd_date), fetch=True) or []
+                if paid or st:
+                    ptot    = round(sum(r["amt"] or 0 for r in paid), 2)
+                    paid_on = fmt_uk_date(paid[0]["paid_date"]) if paid and paid[0]["paid_date"] else "—"
+                    ptr = ""
+                    for r in paid:
+                        ptr += (f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+                                f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
+                                f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
+                                f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['amt'] or 0):,.2f}</td></tr>")
+                    stmt_view = (f"<a href='/invoices/dd-collection/statement/{dict(st[0])['dd_id']}' target='_blank' "
+                                 f"style='color:#1e3a5f;font-weight:700'>📄 View attached statement "
+                                 f"({html.escape(dict(st[0]).get('orig_name') or 'file')})</a>"
+                                 if st else "<span style='color:#94a3b8;font-size:12px'>No statement attached.</span>")
+                    detail = f"""
+                    <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
+                      <div style='padding:14px 18px;background:#334155;color:white;font-weight:700'>
+                        ✅ Reconciled — {store} · DD {fmt_uk_date(dd_date)} · paid {paid_on}
+                      </div>
+                      <div style='overflow-x:auto'><table class='tbl'>
+                        <thead><tr><th>Serial</th><th>Supplier</th><th>Invoice No.</th>
+                          <th style='text-align:right'>Paid</th></tr></thead>
+                        <tbody>{ptr}</tbody>
+                        <tfoot><tr style='background:#f8fafc'>
+                          <td colspan='3' style='text-align:right;font-weight:900'>Collected total:</td>
+                          <td class='mono' style='text-align:right;font-weight:900'>£{ptot:,.2f}</td></tr></tfoot>
+                      </table></div>
+                      <div style='padding:12px 18px;border-top:1px solid #eef2f7'>{stmt_view}</div>
+                    </div>"""
+                else:
+                    detail = ("<div class='card' style='margin-top:14px;color:#64748b'>"
+                              f"Nothing to show for {store} DD {fmt_uk_date(dd_date)}.</div>")
         body = picker + detail
 
     content = f"""
