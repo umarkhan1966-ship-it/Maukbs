@@ -2293,10 +2293,16 @@ def dd_collection(session: str | None = Cookie(default=None),
                    (store, dd_date), fetch=True)
             if st:
                 std = dict(st[0])
+                _rm_stmt = (f"<form method='POST' action='/invoices/dd-collection/statement/{std['dd_id']}/delete' "
+                            f"style='display:inline' onsubmit=\"return confirm('Remove this attached statement? You can then attach the correct one.');\">"
+                            f"<input type='hidden' name='store' value='{store}'>"
+                            f"<input type='hidden' name='dd_date' value='{dd_date}'>"
+                            f"<button type='submit' style='background:none;border:none;color:#dc2626;cursor:pointer;"
+                            f"font-size:11px;font-weight:700;padding:0'>✕ remove / replace</button></form>")
                 stmt_html = (f"<div style='font-size:12px'>📄 DD statement attached: "
                              f"<a href='#' onclick=\"ddShowPdf('/invoices/dd-collection/statement/{std['dd_id']}');return false;\" "
                              f"style='color:#1e3a5f;font-weight:700'>{html.escape(std['orig_name'] or 'view')}</a> "
-                             f"<span style='color:#94a3b8'>(opens side-by-side →)</span></div>")
+                             f"<span style='color:#94a3b8'>(opens side-by-side →)</span> &nbsp;·&nbsp; {_rm_stmt}</div>")
             else:
                 stmt_html = ("<form method='POST' action='/invoices/dd-collection/attach' "
                              "enctype='multipart/form-data' style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
@@ -2394,10 +2400,24 @@ def dd_collection(session: str | None = Cookie(default=None),
                                 f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
                                 f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
                                 f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['amt'] or 0):,.2f}</td></tr>")
-                    stmt_view = (f"<a href='#' onclick=\"ddShowPdf('/invoices/dd-collection/statement/{dict(st[0])['dd_id']}');return false;\" "
-                                 f"style='color:#1e3a5f;font-weight:700'>📄 View attached statement side-by-side "
-                                 f"({html.escape(dict(st[0]).get('orig_name') or 'file')})</a>"
-                                 if st else "<span style='color:#94a3b8;font-size:12px'>No statement attached.</span>")
+                    if st:
+                        _rm_sv = (f"<form method='POST' action='/invoices/dd-collection/statement/{dict(st[0])['dd_id']}/delete' "
+                                  f"style='display:inline' onsubmit=\"return confirm('Remove this attached statement? You can then attach the correct one.');\">"
+                                  f"<input type='hidden' name='store' value='{store}'>"
+                                  f"<input type='hidden' name='dd_date' value='{dd_date}'>"
+                                  f"<button type='submit' style='background:none;border:none;color:#dc2626;cursor:pointer;"
+                                  f"font-size:11px;font-weight:700;padding:0'>✕ remove / replace</button></form>")
+                        stmt_view = (f"<a href='#' onclick=\"ddShowPdf('/invoices/dd-collection/statement/{dict(st[0])['dd_id']}');return false;\" "
+                                     f"style='color:#1e3a5f;font-weight:700'>📄 View attached statement side-by-side "
+                                     f"({html.escape(dict(st[0]).get('orig_name') or 'file')})</a> &nbsp;·&nbsp; {_rm_sv}")
+                    else:
+                        stmt_view = ("<form method='POST' action='/invoices/dd-collection/attach' "
+                                     "enctype='multipart/form-data' style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
+                                     f"<input type='hidden' name='store' value='{store}'>"
+                                     f"<input type='hidden' name='dd_date' value='{dd_date}'>"
+                                     "<span style='font-size:12px;color:#64748b'>No statement attached — add one:</span>"
+                                     "<input type='file' name='statement' accept='.pdf,.png,.jpg,.jpeg' style='font-size:12px'>"
+                                     "<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>📎 Attach</button></form>")
                     detail = f"""
                     <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
                       <div style='padding:14px 18px;background:#334155;color:white;font-weight:700'>
@@ -2642,6 +2662,31 @@ def dd_statement_serve(dd_id: int, session: str | None = Cookie(default=None)):
     mt = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
           ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
     return FileResponse(path, media_type=mt)
+
+
+@router.post("/invoices/dd-collection/statement/{dd_id}/delete")
+async def dd_statement_delete(dd_id: int, request: Request, session: str | None = Cookie(default=None)):
+    """Remove an attached DD statement (e.g. the wrong PDF) so the correct one can
+    be attached. Owner-only; deletes the record and the file."""
+    from urllib.parse import quote as urlquote
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+    form    = await request.form()
+    store   = (form.get("store") or "").strip()
+    dd_date = (form.get("dd_date") or "").strip()
+    rows = q("SELECT file_path FROM dd_statements WHERE dd_id=?", (dd_id,), fetch=True)
+    q("DELETE FROM dd_statements WHERE dd_id=?", (dd_id,))
+    if rows and rows[0]["file_path"]:
+        try:
+            if os.path.exists(rows[0]["file_path"]):
+                os.remove(rows[0]["file_path"])
+        except OSError:
+            pass
+    return RedirectResponse(
+        f"/invoices/dd-collection?store={store}&dd_date={dd_date}&msg=" + urlquote("Statement removed — attach the correct one"),
+        status_code=303)
 
 
 @router.post("/invoices/dd-collection/untag")
