@@ -747,6 +747,29 @@ def invoices_page(
     if is_edit and inv.get("pdf_path"):
         thumb_url = f"/invoices/pdf-thumb/{edit_id}?ledger={ledger}"
         full_url  = f"/invoices/pdf/{edit_id}?ledger={ledger}"
+        # Count pages so we can offer to remove a stray page (e.g. a store report
+        # scanned in with the invoice) without deleting and re-attaching the whole PDF.
+        page_count = 0
+        try:
+            _pp = inv["pdf_path"]
+            if _pp and _pp.lower().endswith(".pdf") and os.path.exists(_pp):
+                from pypdf import PdfReader
+                page_count = len(PdfReader(_pp).pages)
+        except Exception:
+            page_count = 0
+        remove_page_html = ""
+        if page_count > 1:
+            _opts = "".join(f"<option value='{n}'>Page {n}</option>" for n in range(1, page_count + 1))
+            remove_page_html = (
+                f"<form method='POST' action='/invoices/pdf/{edit_id}/remove-page' "
+                f"onsubmit=\"return confirm('Remove the selected page from this invoice PDF? "
+                f"A backup of the original is kept.');\" "
+                f"style='margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
+                f"<input type='hidden' name='ledger' value='{ledger}'>"
+                f"<span style='font-size:12px;color:#b45309;font-weight:700'>PDF has {page_count} pages —</span>"
+                f"<select name='page' style='font-size:12px;padding:2px 6px'>{_opts}</select>"
+                f"<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>"
+                f"&#128465;&#65039; Remove page</button></form>")
         pdf_preview = f"""
         <div style='margin-top:12px;display:flex;gap:14px;align-items:flex-start'>
           <img src='{thumb_url}' alt='Invoice preview'
@@ -760,6 +783,7 @@ def invoices_page(
             <div style='color:#94a3b8;margin-top:4px'>
               Click the thumbnail to enlarge. To replace it, choose a new file above.
             </div>
+            {remove_page_html}
           </div>
         </div>"""
         # Opened from a report with &show_pdf=1 → auto-open the side-by-side PDF.
@@ -1859,6 +1883,49 @@ def serve_pdf(
     if rows and rows[0]["pdf_path"] and os.path.exists(rows[0]["pdf_path"]):
         return FileResponse(rows[0]["pdf_path"], media_type="application/pdf")
     return HTMLResponse("<p>PDF not found</p>", status_code=404)
+
+
+@router.post("/invoices/pdf/{invoice_id}/remove-page")
+def remove_pdf_page(invoice_id: int, ledger: str = Form("Uxbridge"),
+                    page: int = Form(0), session: str | None = Cookie(default=None)):
+    """Remove one page from an invoice's attached PDF (e.g. a store report scanned
+    in with the invoice). Owner/manager only; keeps a one-time .bak of the original."""
+    import shutil
+    from urllib.parse import quote as urlquote
+    redir, user = require_login(session)
+    if redir: return redir
+    table = "property_invoices" if is_property_ledger(ledger) else "supplier_invoices"
+
+    def _back(msg, err=False):
+        tail = "&msg_type=error" if err else ""
+        return RedirectResponse(f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg={urlquote(msg)}{tail}",
+                                status_code=303)
+
+    if user.get("role") not in ("owner", "manager"):
+        return _back("Only the owner or a manager can edit the PDF", err=True)
+    rows = q(f"SELECT pdf_path FROM {table} WHERE invoice_id=?", (invoice_id,), fetch=True)
+    path = rows[0]["pdf_path"] if rows and rows[0]["pdf_path"] else None
+    if not path or not os.path.exists(path) or not path.lower().endswith(".pdf"):
+        return _back("No PDF to edit here", err=True)
+    try:
+        from pypdf import PdfReader, PdfWriter
+        reader = PdfReader(path)
+        n = len(reader.pages)
+        if n <= 1:
+            return _back("This PDF has only one page — use 'delete attachment' instead", err=True)
+        if page < 1 or page > n:
+            return _back("That page number isn't in the PDF", err=True)
+        if not os.path.exists(path + ".bak"):          # one-time backup of the original
+            shutil.copy(path, path + ".bak")
+        writer = PdfWriter()
+        for i, pg in enumerate(reader.pages, start=1):
+            if i != page:
+                writer.add_page(pg)
+        with open(path, "wb") as f:
+            writer.write(f)
+        return _back(f"Removed page {page} — the PDF now has {n - 1} page(s).")
+    except Exception:
+        return _back("Sorry, couldn't edit that PDF", err=True)
 
 
 @router.get("/invoices/pdf-thumb/{invoice_id}")
