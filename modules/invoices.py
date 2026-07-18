@@ -2263,15 +2263,19 @@ def dd_collection(session: str | None = Cookie(default=None),
 
         detail = ""
         if dd_date:
-            rows = q(f"""SELECT seq_no, supplier_name, invoice_number, {_BAL_SQL} AS balance
+            rows = q(f"""SELECT invoice_id, seq_no, supplier_name, invoice_number, {_BAL_SQL} AS balance
                          FROM supplier_invoices
                          WHERE store_name=? AND dd_statement_date=? AND is_paid!='Yes'
                          ORDER BY supplier_name, seq_no""", (store, dd_date), fetch=True) or []
             total = round(sum(r["balance"] or 0 for r in rows), 2)
             sup_default = rows[0]["supplier_name"] if rows else ""
+            # serial links open that invoice in a new tab (so the reconciliation stays put)
+            def _slink(r):
+                return (f"<a href='/invoices?ledger={store}&edit_id={r['invoice_id']}' target='_blank' "
+                        f"class='mono' style='color:#1e3a5f;font-weight:700;font-size:12px'>{r['seq_no'] or '—'}</a>")
             tr = ""
             for r in rows:
-                tr += (f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+                tr += (f"<tr><td>{_slink(r)}</td>"
                        f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
                        f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
                        f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['balance'] or 0):,.2f}</td></tr>")
@@ -2364,7 +2368,7 @@ def dd_collection(session: str | None = Cookie(default=None),
                 </script>"""
             else:
                 # Reconciled (all paid) — read-only review, with the statement to view.
-                paid = q(f"""SELECT seq_no, supplier_name, invoice_number, paid_date,
+                paid = q(f"""SELECT invoice_id, seq_no, supplier_name, invoice_number, paid_date,
                                     COALESCE(amount_paid,0) AS amt
                              FROM supplier_invoices
                              WHERE store_name=? AND dd_statement_date=? AND is_paid='Yes'
@@ -2374,7 +2378,9 @@ def dd_collection(session: str | None = Cookie(default=None),
                     paid_on = fmt_uk_date(paid[0]["paid_date"]) if paid and paid[0]["paid_date"] else "—"
                     ptr = ""
                     for r in paid:
-                        ptr += (f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+                        _sl = (f"<a href='/invoices?ledger={store}&edit_id={r['invoice_id']}' target='_blank' "
+                               f"class='mono' style='color:#1e3a5f;font-weight:700;font-size:12px'>{r['seq_no'] or '—'}</a>")
+                        ptr += (f"<tr><td>{_sl}</td>"
                                 f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
                                 f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
                                 f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['amt'] or 0):,.2f}</td></tr>")
