@@ -2929,59 +2929,102 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
 
 @router.get("/invoices/accountant-sent", response_class=HTMLResponse)
 def accountant_sent(session: str | None = Cookie(default=None), sent_date: str = "",
+                    store: str = "", last_ledger: str | None = Cookie(default=None),
                     msg: str = "", msg_type: str = "success"):
-    """Owner-only report of what HAS been sent to the accountant, grouped by the
-    date sent. Pick a date to see every invoice in that batch."""
+    """Owner-only report of what HAS been sent to the accountant. Each store is a
+    SEPARATE company, so the view is PER STORE (Uxbridge / Newbury / Properties),
+    with an 'All stores' option. Pick a store, then a date, to see that batch."""
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
         return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
 
+    # Default to the store the owner was last working in (so Send-to-Accountant
+    # from Newbury lands on Newbury's history), falling back to Uxbridge.
+    # store="ALL" shows every store together.
+    if not store:
+        ll = last_ledger or "Uxbridge"
+        if ll.startswith("PROP:"):          store = "Properties"
+        elif ll in ("Uxbridge", "Newbury"): store = ll
+        else:                               store = "Uxbridge"
+    is_all  = (store == "ALL")
+    is_prop = (store == "Properties")
+    use_sup  = is_all or store in ("Uxbridge", "Newbury")
+    use_prop = is_all or is_prop
+    sup_where, sup_params = (("AND store_name=?", [store])
+                             if store in ("Uxbridge", "Newbury") else ("", []))
+    store_label = "All stores" if is_all else store
+
+    def _chip(v, label):
+        on = (v == store)
+        st = ("background:#0f2942;color:#fff;border:1px solid #0f2942" if on
+              else "background:#fff;color:#0f2942;border:1px solid #cbd5e1")
+        return (f"<a href='/invoices/accountant-sent?store={v}' style='{st};padding:6px 14px;"
+                f"border-radius:999px;font-weight:700;font-size:13px;text-decoration:none'>{label}</a>")
+    chips_html = ("<div style='display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 2px'>"
+                  + _chip("Uxbridge", "🏪 Uxbridge") + _chip("Newbury", "🏪 Newbury")
+                  + _chip("Properties", "🏠 Properties") + _chip("ALL", "📚 All stores")
+                  + "</div>")
+
     if sent_date:
-        # True batch count/total (not limited by the display cap below).
-        agg = q("""SELECT COUNT(*) n, COALESCE(SUM(gross_amount),0) t FROM (
-                     SELECT gross_amount FROM supplier_invoices WHERE accountant_sent_date=?
-                     UNION ALL
-                     SELECT gross_amount FROM property_invoices WHERE accountant_sent_date=?
-                   )""", (sent_date, sent_date), fetch=True)[0]
+        # True batch count/total (not limited by the display cap below), scoped
+        # to the chosen store.
+        agg_parts, agg_params, row_parts, row_params = [], [], [], []
+        if use_sup:
+            agg_parts.append(f"SELECT gross_amount FROM supplier_invoices WHERE accountant_sent_date=? {sup_where}")
+            agg_params += [sent_date] + sup_params
+            row_parts.append(f"""SELECT 'Retail' src, store_name loc, seq_no, supplier_name,
+                       invoice_number, invoice_date, gross_amount, invoice_id
+                       FROM supplier_invoices WHERE accountant_sent_date=? {sup_where}""")
+            row_params += [sent_date] + sup_params
+        if use_prop:
+            agg_parts.append("SELECT gross_amount FROM property_invoices WHERE accountant_sent_date=?")
+            agg_params.append(sent_date)
+            row_parts.append("""SELECT 'Property', property_name, seq_no, supplier_name,
+                       invoice_number, invoice_date, gross_amount, invoice_id
+                       FROM property_invoices WHERE accountant_sent_date=?""")
+            row_params.append(sent_date)
+        agg = q(f"SELECT COUNT(*) n, COALESCE(SUM(gross_amount),0) t FROM ({' UNION ALL '.join(agg_parts)})",
+                agg_params, fetch=True)[0]
         true_count, total = agg["n"], agg["t"]
-        rows = q("""
-            SELECT 'Retail' src, store_name loc, seq_no, supplier_name, invoice_number,
-                   invoice_date, gross_amount, invoice_id
-            FROM supplier_invoices WHERE accountant_sent_date=?
-            UNION ALL
-            SELECT 'Property', property_name, seq_no, supplier_name, invoice_number,
-                   invoice_date, gross_amount, invoice_id
-            FROM property_invoices WHERE accountant_sent_date=?
-            ORDER BY loc, supplier_name LIMIT 1000
-        """, (sent_date, sent_date), fetch=True) or []
+        rows = q(" UNION ALL ".join(row_parts) + " ORDER BY loc, supplier_name LIMIT 1000",
+                 row_params, fetch=True) or []
         capped_note = (f"<div style='color:#b45309;font-size:12px;padding:8px 18px'>"
                        f"Showing the first 1,000 of {true_count:,} — the batch total above covers all of them."
                        f"</div>") if true_count > len(rows) else ""
-        # Each store is a SEPARATE Ltd company (and gets its own accountant PDF),
-        # so group the list by store/property with a header + subtotal per group,
-        # rather than one undivided run. Rows are already ordered by loc.
+        # When more than one store/property is shown together (the "All stores"
+        # view, or Properties with several properties), group with a header +
+        # subtotal per group — each is a SEPARATE company. A single-store view
+        # needs none of that (the batch total below already covers it).
         from itertools import groupby
+        grouped = [(loc, list(grp)) for loc, grp in groupby(rows, key=lambda r: r["loc"] or "—")]
+        multi = len(grouped) > 1
+
+        def _row(r):
+            return (f"<tr><td>{acct_serial_link(r['src'] == 'Property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
+                    f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
+                    f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
+                    f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
+                    f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
         tr = ""
-        for loc, grp in groupby(rows, key=lambda r: r["loc"] or "—"):
-            grp = list(grp)
-            sub = sum((x["gross_amount"] or 0) for x in grp)
-            tr += (f"<tr style='background:#0f2942'><td colspan='5' style='color:white;"
-                   f"font-weight:800;font-size:13px;padding:8px 14px'>🏢 {html.escape(loc)} "
-                   f"— {len(grp)} invoice(s)</td></tr>")
-            for r in grp:
-                tr += (f"<tr><td>{acct_serial_link(r['src'] == 'Property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
-                       f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
-                       f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
-                       f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
-                       f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
-            tr += (f"<tr style='background:#eef4fb'><td colspan='4' style='text-align:right;"
-                   f"font-weight:800'>{html.escape(loc)} subtotal:</td>"
-                   f"<td class='mono' style='text-align:right;font-weight:800;color:#0f2942'>£{sub:,.2f}</td></tr>")
+        for loc, grp in grouped:
+            if multi:
+                sub = sum((x["gross_amount"] or 0) for x in grp)
+                tr += (f"<tr style='background:#0f2942'><td colspan='5' style='color:white;"
+                       f"font-weight:800;font-size:13px;padding:8px 14px'>🏢 {html.escape(loc)} "
+                       f"— {len(grp)} invoice(s)</td></tr>")
+            tr += "".join(_row(r) for r in grp)
+            if multi:
+                tr += (f"<tr style='background:#eef4fb'><td colspan='4' style='text-align:right;"
+                       f"font-weight:800'>{html.escape(loc)} subtotal:</td>"
+                       f"<td class='mono' style='text-align:right;font-weight:800;color:#0f2942'>£{sub:,.2f}</td></tr>")
+        if not tr:
+            tr = ("<tr><td colspan='5' style='text-align:center;padding:24px;color:#94a3b8'>"
+                  f"Nothing sent for {html.escape(store_label)} on this date.</td></tr>")
         body = f"""
         <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
           <div style='padding:14px 18px;background:#0f2942;color:white;font-weight:700'>
-            Sent {fmt_uk_date(sent_date)} — {true_count:,} invoice(s)
+            Sent {fmt_uk_date(sent_date)} · {html.escape(store_label)} — {true_count:,} invoice(s)
           </div>
           {capped_note}
           <div style='overflow-x:auto'>
@@ -2990,47 +3033,55 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
                 <th>Invoice No.</th><th>Inv. Date</th><th style='text-align:right'>Gross</th></tr></thead>
               <tbody>{tr}</tbody>
               <tfoot><tr style='background:#f0fdf4'>
-                <td colspan='4' style='text-align:right;font-weight:900'>Batch total (all stores):</td>
+                <td colspan='4' style='text-align:right;font-weight:900'>{'Batch total (all stores)' if is_all else store_label + ' total'}:</td>
                 <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
               </tr></tfoot>
             </table>
           </div>
         </div>"""
-        # A combined PDF per STORE (separate companies), plus ONE for ALL
-        # properties (done together), each in invoice-date order.
+        # A combined PDF per STORE (separate companies) / Properties, each in
+        # invoice-date order. In a single-store view show just that store's PDF;
+        # in the All-stores view show every store present + Properties.
         from urllib.parse import quote as _q
-        _stores = q("""SELECT DISTINCT store_name s FROM supplier_invoices
-                       WHERE accountant_sent_date=? AND store_name IS NOT NULL AND store_name<>''
-                       ORDER BY store_name""", (sent_date,), fetch=True) or []
-        _hasprop = q("SELECT 1 FROM property_invoices WHERE accountant_sent_date=? LIMIT 1",
-                     (sent_date,), fetch=True)
-        _dl = "".join(
-            f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(s['s'])}' "
-            f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ {s['s']} PDF</a>" for s in _stores)
-        if _hasprop:
-            _dl += (f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc=Properties' "
-                    f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ Properties PDF</a>")
+        if is_all:
+            _stores = q("""SELECT DISTINCT store_name s FROM supplier_invoices
+                           WHERE accountant_sent_date=? AND store_name IS NOT NULL AND store_name<>''
+                           ORDER BY store_name""", (sent_date,), fetch=True) or []
+            _dl = "".join(
+                f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(s['s'])}' "
+                f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ {s['s']} PDF</a>" for s in _stores)
+            if q("SELECT 1 FROM property_invoices WHERE accountant_sent_date=? LIMIT 1", (sent_date,), fetch=True):
+                _dl += (f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc=Properties' "
+                        f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ Properties PDF</a>")
+        else:
+            _dl = (f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(store)}' "
+                   f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ {store_label} PDF</a>")
         _cmp = ("<label style='font-size:12px;color:#475569;display:flex;align-items:center;gap:4px'>"
                 "<input type='checkbox' id='cmp'> 🗜️ Smaller file (for email)</label>")
+        _unsend_scope = "ALL invoices in this batch" if is_all else f"{store_label}'s invoices in this batch"
         _unsend = ("<form method='POST' action='/invoices/accountant-unsend' style='display:inline' "
-                   "onsubmit=\"return confirm('Un-mark ALL invoices in this batch as sent? They go back to "
+                   f"onsubmit=\"return confirm('Un-mark {_unsend_scope} as sent? They go back to "
                    "not-yet-sent. Nothing else changes.');\">"
                    f"<input type='hidden' name='sent_date' value='{sent_date}'>"
+                   f"<input type='hidden' name='store' value='{store}'>"
                    "<button type='submit' class='btn-secondary' style='font-size:12px;color:#dc2626'>"
                    "↩ Un-mark this batch as sent</button></form>")
-        head_extra = _cmp + _dl + _unsend + "<a href='/invoices/accountant-sent' class='btn-secondary'>↩ All batches</a>"
+        head_extra = (_cmp + _dl + _unsend
+                      + f"<a href='/invoices/accountant-sent?store={store}' class='btn-secondary'>↩ All batches</a>")
     else:
-        batches = q("""
-            SELECT d, SUM(n) n, SUM(t) t FROM (
-              SELECT accountant_sent_date d, COUNT(*) n, COALESCE(SUM(gross_amount),0) t
-              FROM supplier_invoices WHERE accountant_sent_date IS NOT NULL GROUP BY d
-              UNION ALL
-              SELECT accountant_sent_date d, COUNT(*) n, COALESCE(SUM(gross_amount),0) t
-              FROM property_invoices WHERE accountant_sent_date IS NOT NULL GROUP BY d
-            ) GROUP BY d ORDER BY d DESC
-        """, (), fetch=True) or []
+        # Batch list scoped to the chosen store (each store's own send history).
+        b_parts, b_params = [], []
+        if use_sup:
+            b_parts.append(f"""SELECT accountant_sent_date d, COUNT(*) n, COALESCE(SUM(gross_amount),0) t
+                  FROM supplier_invoices WHERE accountant_sent_date IS NOT NULL {sup_where} GROUP BY d""")
+            b_params += sup_params
+        if use_prop:
+            b_parts.append("""SELECT accountant_sent_date d, COUNT(*) n, COALESCE(SUM(gross_amount),0) t
+                  FROM property_invoices WHERE accountant_sent_date IS NOT NULL GROUP BY d""")
+        batches = q("SELECT d, SUM(n) n, SUM(t) t FROM (" + " UNION ALL ".join(b_parts)
+                    + ") GROUP BY d ORDER BY d DESC", b_params, fetch=True) or []
         rowshtml = "".join(
-            f"<tr style='cursor:pointer' onclick=\"window.location='/invoices/accountant-sent?sent_date={b['d']}'\">"
+            f"<tr style='cursor:pointer' onclick=\"window.location='/invoices/accountant-sent?store={store}&sent_date={b['d']}'\">"
             f"<td style='font-weight:700'>{fmt_uk_date(b['d'])}</td>"
             f"<td class='mono' style='text-align:right'>{b['n']}</td>"
             f"<td class='mono' style='text-align:right'>£{(b['t'] or 0):,.2f}</td></tr>"
@@ -3041,7 +3092,7 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
             <table class='tbl'>
               <thead><tr><th>Date sent</th><th style='text-align:right'>Invoices</th>
                 <th style='text-align:right'>Total</th></tr></thead>
-              <tbody>{rowshtml or "<tr><td colspan='3' style='text-align:center;padding:24px;color:#94a3b8'>Nothing sent yet</td></tr>"}</tbody>
+              <tbody>{rowshtml or f"<tr><td colspan='3' style='text-align:center;padding:24px;color:#94a3b8'>Nothing sent yet for {html.escape(store_label)}</td></tr>"}</tbody>
             </table>
           </div>
         </div>
@@ -3054,13 +3105,14 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
     content = f"""
     {_flash}
     <div class='flex justify-between items-center'>
-      <div class='text-2xl font-black text-slate-800'>📋 Sent to Accountant — history</div>
+      <div class='text-2xl font-black text-slate-800'>📋 Sent to Accountant — {html.escape(store_label)}</div>
       <div class='flex gap-2'>
         {head_extra}
         <a href='/invoices/accountant-batch' class='btn-secondary'>📨 Send more</a>
         <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
       </div>
     </div>
+    {chips_html}
     {body}
     <script>
     (function(){{
@@ -3076,10 +3128,13 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
 
 
 @router.post("/invoices/accountant-unsend")
-def accountant_unsend(sent_date: str = Form(""), session: str | None = Cookie(default=None)):
-    """Owner-only: clear the 'sent to accountant' date for every invoice in a
+def accountant_unsend(sent_date: str = Form(""), store: str = Form(""),
+                      session: str | None = Cookie(default=None)):
+    """Owner-only: clear the 'sent to accountant' date for the invoices in a
     batch, putting them back to 'not yet sent' — e.g. after a test run, or to fix
-    a mis-marked batch. Non-destructive: only the sent flag is cleared."""
+    a mis-marked batch. Non-destructive: only the sent flag is cleared. Scoped to
+    the chosen store so un-marking one store's batch leaves the other store's
+    same-date batch untouched (store='ALL'/'' = every store on that date)."""
     redir, user = require_login(session)
     if redir: return redir
     from urllib.parse import quote as urlquote
@@ -3089,14 +3144,25 @@ def accountant_unsend(sent_date: str = Form(""), session: str | None = Cookie(de
         return RedirectResponse("/invoices/accountant-sent", status_code=303)
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     who = user.get("username", "")
+    is_all  = store in ("", "ALL")
+    is_prop = (store == "Properties")
     n = 0
-    for tbl in ("supplier_invoices", "property_invoices"):
-        cnt = q(f"SELECT COUNT(*) c FROM {tbl} WHERE accountant_sent_date=?", (sent_date,), fetch=True)
+    # supplier_invoices (retail): all stores, or one named store
+    if is_all or store in ("Uxbridge", "Newbury"):
+        extra, params = (("AND store_name=?", [store]) if store in ("Uxbridge", "Newbury") else ("", []))
+        cnt = q(f"SELECT COUNT(*) c FROM supplier_invoices WHERE accountant_sent_date=? {extra}",
+                [sent_date] + params, fetch=True)
         n += (cnt[0]["c"] if cnt else 0)
-        q(f"UPDATE {tbl} SET accountant_sent_date=NULL, updated_by=?, updated_at=? WHERE accountant_sent_date=?",
+        q(f"UPDATE supplier_invoices SET accountant_sent_date=NULL, updated_by=?, updated_at=? "
+          f"WHERE accountant_sent_date=? {extra}", [who, now_ts, sent_date] + params)
+    # property_invoices: only in the ALL or Properties views
+    if is_all or is_prop:
+        cnt = q("SELECT COUNT(*) c FROM property_invoices WHERE accountant_sent_date=?", (sent_date,), fetch=True)
+        n += (cnt[0]["c"] if cnt else 0)
+        q("UPDATE property_invoices SET accountant_sent_date=NULL, updated_by=?, updated_at=? WHERE accountant_sent_date=?",
           (who, now_ts, sent_date))
     return RedirectResponse(
-        f"/invoices/accountant-sent?msg={urlquote(f'Un-marked {n} invoice(s) — back to not-yet-sent.')}&msg_type=success",
+        f"/invoices/accountant-sent?store={store}&msg={urlquote(f'Un-marked {n} invoice(s) — back to not-yet-sent.')}&msg_type=success",
         status_code=303)
 
 
