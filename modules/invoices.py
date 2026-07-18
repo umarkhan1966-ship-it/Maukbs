@@ -365,6 +365,15 @@ def prop_name(store_val: str) -> str:
     return store_val.replace("PROP:", "")
 
 
+def acct_serial_link(is_property: bool, loc: str, invoice_id, seq_no) -> str:
+    """A clickable serial number that opens the invoice in a new tab. Retail
+    invoices open under their store ledger; property invoices under PROP:<name>."""
+    led = f"PROP:{loc}" if is_property else (loc or "")
+    return (f"<a href='/invoices?ledger={urlquote(led)}&edit_id={invoice_id}' target='_blank' "
+            f"class='mono' style='color:#1e3a5f;font-weight:700;font-size:12px' "
+            f"title='Open this invoice in a new tab'>{seq_no if seq_no is not None else '—'}</a>")
+
+
 def fetch_invoices(ledger: str, search: str, status: str,
                    pg: int, page_size: int = 30,
                    sort: str = "", direction: str = "desc"):
@@ -432,8 +441,10 @@ def fetch_invoices(ledger: str, search: str, status: str,
 
 @router.get("/invoices", response_class=HTMLResponse)
 def invoices_page(
+    response: Response,
     session:  str | None = Cookie(default=None),
-    ledger:   str = "Uxbridge",
+    ledger:   str = "",
+    last_ledger: str | None = Cookie(default=None),
     search:   str = "",
     status:   str = "",
     pg:       int = 1,
@@ -446,6 +457,13 @@ def invoices_page(
 ):
     redir, user = require_login(session)
     if redir: return redir
+
+    # Land back on the store/area you were last working in — not always Uxbridge.
+    # An explicit ?ledger= in the URL always wins; otherwise fall back to the last
+    # ledger this browser viewed (remembered in a cookie), then Uxbridge.
+    if not ledger:
+        ledger = last_ledger or "Uxbridge"
+    response.set_cookie("last_ledger", ledger, max_age=60 * 60 * 24 * 30, samesite="lax")
 
     today      = datetime.now().strftime("%Y-%m-%d")
     is_prop    = is_property_ledger(ledger)
@@ -2795,7 +2813,7 @@ def accountant_batch(session: str | None = Cookie(default=None),
     tr = ""
     for src, r in rows:
         tr += (f"<tr><td><input type='checkbox' name='ids' value='{src}:{r['invoice_id']}' checked class='rowchk'></td>"
-               f"<td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+               f"<td>{acct_serial_link(src == 'property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
                f"<td style='font-size:12px'>{r['loc']}</td>"
                f"<td style='font-weight:700'>{r['supplier_name']}</td>"
                f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
@@ -2929,11 +2947,11 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
         true_count, total = agg["n"], agg["t"]
         rows = q("""
             SELECT 'Retail' src, store_name loc, seq_no, supplier_name, invoice_number,
-                   invoice_date, gross_amount
+                   invoice_date, gross_amount, invoice_id
             FROM supplier_invoices WHERE accountant_sent_date=?
             UNION ALL
             SELECT 'Property', property_name, seq_no, supplier_name, invoice_number,
-                   invoice_date, gross_amount
+                   invoice_date, gross_amount, invoice_id
             FROM property_invoices WHERE accountant_sent_date=?
             ORDER BY loc, supplier_name LIMIT 1000
         """, (sent_date, sent_date), fetch=True) or []
@@ -2941,7 +2959,7 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
                        f"Showing the first 1,000 of {true_count:,} — the batch total above covers all of them."
                        f"</div>") if true_count > len(rows) else ""
         tr = "".join(
-            f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+            f"<tr><td>{acct_serial_link(r['src'] == 'Property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
             f"<td style='font-size:12px'>{r['loc']}</td>"
             f"<td style='font-weight:700'>{r['supplier_name']}</td>"
             f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
