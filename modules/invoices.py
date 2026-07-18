@@ -2405,17 +2405,17 @@ def dd_collection(session: str | None = Cookie(default=None),
     # Side-by-side statement viewer (like the invoice PDF panel): opens the DD
     # statement on the right so it can be read while reconciling on the left.
     dd_panel = """
-    <div id="ddPdfPanel" style="display:none;position:fixed;top:0;right:0;width:46%;height:100vh;
-         background:#fff;box-shadow:-4px 0 20px rgba(0,0,0,.18);z-index:70;flex-direction:column">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#0f2942;color:#fff">
-        <span style="font-weight:700;font-size:13px">&#128196; DD statement</span>
-        <button onclick="ddClosePdf()" class="btn-secondary" style="padding:3px 12px;font-size:12px">&#10005; Close</button>
+    <div id="ddPdfPanel" style="display:none;position:fixed;top:0;right:0;width:45%;height:100vh;
+         background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.15);z-index:1000;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#0f2942;color:#fff">
+        <span style="font-weight:700;font-size:14px">&#128196; DD statement</span>
+        <button onclick="ddClosePdf()" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-weight:700">&#10005; Close</button>
       </div>
-      <iframe id="ddPdfFrame" src="" style="flex:1;width:100%;border:none"></iframe>
+      <iframe id="ddPdfFrame" src="" style="flex:1;width:100%;height:calc(100vh - 48px);border:none"></iframe>
     </div>
     <script>
-    function ddShowPdf(u){var p=document.getElementById('ddPdfPanel');document.getElementById('ddPdfFrame').src=u;p.style.display='flex';var m=document.getElementById('ddMain');if(m)m.style.marginRight='47%';}
-    function ddClosePdf(){var p=document.getElementById('ddPdfPanel');p.style.display='none';document.getElementById('ddPdfFrame').src='';var m=document.getElementById('ddMain');if(m)m.style.marginRight='0';}
+    function ddShowPdf(u){document.getElementById('ddPdfFrame').src=u;document.getElementById('ddPdfPanel').style.display='flex';var m=document.querySelector('.ml-52');if(m)m.style.marginRight='45%';}
+    function ddClosePdf(){document.getElementById('ddPdfPanel').style.display='none';document.getElementById('ddPdfFrame').src='';var m=document.querySelector('.ml-52');if(m)m.style.marginRight='0';}
     </script>"""
     # Auto-open the statement (side-by-side) right after it's attached.
     auto_open = ""
