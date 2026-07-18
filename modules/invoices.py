@@ -2275,10 +2275,19 @@ def dd_collection(session: str | None = Cookie(default=None),
                         f"class='mono' style='color:#1e3a5f;font-weight:700;font-size:12px'>{r['seq_no'] or '—'}</a>")
             tr = ""
             for r in rows:
+                _rm = (f"<form method='POST' action='/invoices/dd-collection/untag' style='display:inline' "
+                       f"onsubmit=\"return confirm('Remove serial {r['seq_no']} from this collection? "
+                       f"It goes back to untagged/unpaid.');\">"
+                       f"<input type='hidden' name='store' value='{store}'>"
+                       f"<input type='hidden' name='dd_date' value='{dd_date}'>"
+                       f"<input type='hidden' name='inv' value='{r['invoice_id']}'>"
+                       f"<button type='submit' title='Remove from this collection' "
+                       f"style='background:none;border:none;color:#dc2626;cursor:pointer;font-weight:900;font-size:14px'>&#10005;</button></form>")
                 tr += (f"<tr><td>{_slink(r)}</td>"
                        f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
                        f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
-                       f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['balance'] or 0):,.2f}</td></tr>")
+                       f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['balance'] or 0):,.2f}</td>"
+                       f"<td style='text-align:center'>{_rm}</td></tr>")
 
             st = q("SELECT dd_id, orig_name FROM dd_statements WHERE store_name=? AND dd_date=? ORDER BY dd_id DESC LIMIT 1",
                    (store, dd_date), fetch=True)
@@ -2307,11 +2316,12 @@ def dd_collection(session: str | None = Cookie(default=None),
                   <div style='overflow-x:auto'>
                     <table class='tbl'>
                       <thead><tr><th>Serial</th><th>Supplier</th><th>Invoice No.</th>
-                        <th style='text-align:right'>Balance</th></tr></thead>
+                        <th style='text-align:right'>Balance</th><th></th></tr></thead>
                       <tbody>{tr}</tbody>
                       <tfoot><tr style='background:#f0fdf4'>
                         <td colspan='3' style='text-align:right;font-weight:900'>App total for this collection:</td>
                         <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
+                        <td></td>
                       </tr></tfoot>
                     </table>
                   </div>
@@ -2632,6 +2642,28 @@ def dd_statement_serve(dd_id: int, session: str | None = Cookie(default=None)):
     mt = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
           ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
     return FileResponse(path, media_type=mt)
+
+
+@router.post("/invoices/dd-collection/untag")
+async def dd_untag(request: Request, session: str | None = Cookie(default=None)):
+    """Remove one invoice from a DD collection (clear its statement date) — e.g. a
+    credit the supplier listed but didn't actually apply. Owner-only; leaves it unpaid."""
+    from urllib.parse import quote as urlquote
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+    form    = await request.form()
+    store   = (form.get("store") or "").strip()
+    dd_date = (form.get("dd_date") or "").strip()
+    try:    iid = int(form.get("inv") or 0)
+    except (TypeError, ValueError): iid = 0
+    if iid and store:
+        q("""UPDATE supplier_invoices SET dd_statement_date=NULL
+             WHERE invoice_id=? AND store_name=? AND is_paid!='Yes'""", (iid, store))
+    return RedirectResponse(
+        f"/invoices/dd-collection?store={store}&dd_date={dd_date}&msg=" + urlquote("Removed from this collection"),
+        status_code=303)
 
 
 @router.post("/invoices/dd-collection/tag")
