@@ -2406,7 +2406,55 @@ def dd_collection(session: str | None = Cookie(default=None),
                 else:
                     detail = ("<div class='card' style='margin-top:14px;color:#64748b'>"
                               f"Nothing to show for {store} DD {fmt_uk_date(dd_date)}.</div>")
-        body = picker + detail
+
+        # "Tag a new collection": tick the invoices on a statement and give them the
+        # statement date in one go (does NOT pay them). Shown when no date is selected.
+        tag_section = ""
+        if not dd_date:
+            untagged = q("""SELECT invoice_id, seq_no, supplier_name, invoice_number, invoice_date, gross_amount
+                            FROM supplier_invoices
+                            WHERE store_name=? AND dd_statement_date IS NULL AND is_paid!='Yes'
+                            ORDER BY supplier_name, invoice_date""", (store,), fetch=True) or []
+            trr = ""
+            for r in untagged:
+                r = dict(r)
+                trr += (f"<tr class='tagrow'><td><input type='checkbox' name='inv' value='{r['invoice_id']}'></td>"
+                        f"<td class='mono' style='font-size:12px;color:#94a3b8'>{r['seq_no'] or ''}</td>"
+                        f"<td class='tsup' style='font-weight:700;font-size:12px'>{html.escape(r['supplier_name'] or '')}</td>"
+                        f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
+                        f"<td style='font-size:12px'>{fmt_uk_date(r['invoice_date'])}</td>"
+                        f"<td class='mono' style='text-align:right;font-size:12px'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
+            tag_section = f"""
+            <div class='card' style='margin-top:14px'>
+              <div style='font-weight:900;color:#0f2942;margin-bottom:4px'>➕ Tag a new collection</div>
+              <div style='font-size:12px;color:#64748b;margin-bottom:10px'>
+                Tick the invoices on a DD statement and give them the statement date — this groups them so you
+                can reconcile them together below. It does <b>not</b> mark them paid.</div>
+              <input type='text' id='tagFilter' onkeyup='tagFilterRows()' placeholder='Filter by supplier…'
+                     style='font-size:12px;padding:4px 8px;min-width:240px;margin-bottom:8px'>
+              <form method='POST' action='/invoices/dd-collection/tag'>
+                <input type='hidden' name='store' value='{store}'>
+                <div style='display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap'>
+                  <label style='font-size:12px;font-weight:700'>DD statement date:</label>
+                  <input type='date' name='dd_date' required style='font-size:12px;padding:3px 6px'>
+                  <button type='submit' class='btn-primary' style='padding:4px 14px;font-size:12px'>Tag ticked invoices →</button>
+                </div>
+                <div style='overflow-x:auto;max-height:360px;overflow-y:auto'>
+                  <table class='tbl'>
+                    <thead><tr><th></th><th>Serial</th><th>Supplier</th><th>Invoice No.</th><th>Date</th>
+                      <th style='text-align:right'>Amount</th></tr></thead>
+                    <tbody>{trr or "<tr><td colspan='6' style='color:#94a3b8'>No untagged unpaid invoices for this store.</td></tr>"}</tbody>
+                  </table>
+                </div>
+              </form>
+            </div>
+            <script>
+            function tagFilterRows(){{var s=(document.getElementById('tagFilter').value||'').toLowerCase();
+              document.querySelectorAll('.tagrow').forEach(function(tr){{
+                var v=(tr.querySelector('.tsup').textContent||'').toLowerCase();
+                tr.style.display=v.indexOf(s)>=0?'':'none';}});}}
+            </script>"""
+        body = picker + detail + tag_section
 
     # Side-by-side statement viewer (like the invoice PDF panel): opens the DD
     # statement on the right so it can be read while reconciling on the left.
@@ -2584,6 +2632,33 @@ def dd_statement_serve(dd_id: int, session: str | None = Cookie(default=None)):
     mt = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
           ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
     return FileResponse(path, media_type=mt)
+
+
+@router.post("/invoices/dd-collection/tag")
+async def dd_tag(request: Request, session: str | None = Cookie(default=None)):
+    """Tag the ticked invoices with a DD statement date (groups them for
+    reconciliation). Owner-only; does NOT mark them paid."""
+    from urllib.parse import quote as urlquote
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+    form    = await request.form()
+    store   = (form.get("store") or "").strip()
+    dd_date = (form.get("dd_date") or "").strip()
+    ids     = [int(x) for x in form.getlist("inv") if str(x).isdigit()]
+    back    = f"/invoices/dd-collection?store={store}"
+    if not (store and dd_date and ids):
+        return RedirectResponse(back + "&msg=" + urlquote("Pick a date and tick at least one invoice") + "&msg_type=error",
+                                status_code=303)
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for iid in ids:                        # guard: only this store's unpaid invoices
+        q("""UPDATE supplier_invoices SET dd_statement_date=?, updated_by=?, updated_at=?
+             WHERE invoice_id=? AND store_name=? AND is_paid!='Yes'""",
+          (dd_date, user.get("username", ""), now_ts, iid, store))
+    return RedirectResponse(
+        f"/invoices/dd-collection?store={store}&dd_date={dd_date}&msg="
+        + urlquote(f"Tagged {len(ids)} invoice(s) to {dd_date} — now reconcile below"), status_code=303)
 
 
 @router.get("/invoices/accountant-batch", response_class=HTMLResponse)
