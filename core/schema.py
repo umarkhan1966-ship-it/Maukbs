@@ -264,6 +264,20 @@ def init_db():
         )
     """)
 
+    # ── DD collection statements (the supplier's Direct-Debit advice, attached
+    #    to a store's reconciliation for a given statement date) ──
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS dd_statements (
+            dd_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_name  TEXT NOT NULL,
+            dd_date     TEXT NOT NULL,
+            file_path   TEXT NOT NULL,
+            orig_name   TEXT,
+            uploaded_by TEXT,
+            uploaded_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     # ── Company legal entities: ALL of Umar's own trading entities in ONE place ──
     # Retail stores AND property companies. Every screen that shows a company name
     # (contracts, offer letters, onboarding forms, the property ledger) reads from

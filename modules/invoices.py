@@ -2196,86 +2196,19 @@ _BAL_SQL = "COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_not
 
 @router.get("/invoices/dd-collection", response_class=HTMLResponse)
 def dd_collection(session: str | None = Cookie(default=None),
-                  dd_date: str = "", msg: str = "", msg_type: str = "success"):
-    """Owner-only DD reconciliation: pick a DD statement date, see all invoices
-    that share it with a grand total, then mark the whole collection paid."""
+                  store: str = "", dd_date: str = "", msg: str = "", msg_type: str = "success"):
+    """Owner-only DD reconciliation, ONE STORE at a time (each store is a separate
+    bank account with its own DD statements): pick a store, pick a statement date,
+    see that store's invoices for it + total, add any missing credit, attach the
+    statement, then mark the whole collection paid."""
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
         return RedirectResponse("/invoices?msg=DD+Collection+Check+is+owner-only&msg_type=error",
                                 status_code=303)
-
-    # DD statement dates that still have unpaid invoices (the picker).
-    dates = q(f"""SELECT dd_statement_date d, COUNT(*) n, SUM({_BAL_SQL}) tot
-                  FROM supplier_invoices
-                  WHERE dd_statement_date IS NOT NULL AND is_paid!='Yes'
-                  GROUP BY dd_statement_date ORDER BY dd_statement_date DESC""",
-              (), fetch=True) or []
-
-    chips = ""
-    for r in dates:
-        sel = "background:#0f2942;color:white" if r["d"] == dd_date else "background:#ecfdf5;color:#047857;border:1px solid #6ee7b7"
-        chips += (f"<a href='/invoices/dd-collection?dd_date={r['d']}' "
-                  f"style='{sel};border-radius:8px;padding:6px 12px;margin:3px;font-size:13px;"
-                  f"font-weight:700;text-decoration:none;display:inline-block'>"
-                  f"{fmt_uk_date(r['d'])} · {r['n']} inv · £{(r['tot'] or 0):,.2f}</a>")
-    if not chips:
-        chips = "<span style='color:#94a3b8;font-size:13px'>No unpaid invoices have a DD statement date.</span>"
-
-    body = ""
-    if dd_date:
-        rows = q(f"""SELECT invoice_id, seq_no, store_name, supplier_name, invoice_number,
-                            gross_amount, {_BAL_SQL} AS balance
-                     FROM supplier_invoices
-                     WHERE dd_statement_date=? AND is_paid!='Yes'
-                     ORDER BY store_name, supplier_name, seq_no""", (dd_date,), fetch=True) or []
-        total = round(sum(r["balance"] or 0 for r in rows), 2)
-        tr = ""
-        for r in rows:
-            tr += (f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
-                   f"<td style='font-size:12px'>{r['store_name']}</td>"
-                   f"<td style='font-weight:700'>{r['supplier_name']}</td>"
-                   f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
-                   f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['balance'] or 0):,.2f}</td></tr>")
-        if rows:
-            body = f"""
-            <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
-              <div style='padding:14px 18px;background:#0f2942;color:white;font-weight:700'>
-                DD Statement {fmt_uk_date(dd_date)} — {len(rows)} invoice(s)
-              </div>
-              <div style='overflow-x:auto'>
-                <table class='tbl'>
-                  <thead><tr><th>Serial</th><th>Store</th><th>Supplier</th><th>Invoice No.</th>
-                    <th style='text-align:right'>Balance</th></tr></thead>
-                  <tbody>{tr}</tbody>
-                  <tfoot><tr style='background:#f0fdf4'>
-                    <td colspan='4' style='text-align:right;font-weight:900'>Grand total (should match the bank):</td>
-                    <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
-                  </tr></tfoot>
-                </table>
-              </div>
-              <form method='POST' action='/invoices/dd-collection/mark-paid' style='padding:16px 18px;background:#f8fafc'>
-                <input type='hidden' name='dd_date' value='{dd_date}'>
-                <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-3'>Mark this whole collection paid</div>
-                <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(180px,1fr))'>
-                  <div><label>Bank debit date</label>
-                    <input type='date' name='bank_debit_date' value='{dd_date}'></div>
-                  <div><label>Actual amount collected (£)</label>
-                    <input type='number' step='0.01' name='actual_amount' value='{total:.2f}'></div>
-                  <div style='grid-column:1/-1'><label>Note (e.g. statement out by 1p)</label>
-                    <input type='text' name='note' placeholder='Optional — explains any difference'></div>
-                </div>
-                <div style='margin-top:12px'>
-                  <button type='submit' class='btn-primary'
-                    onclick="return confirm('Mark all {len(rows)} invoice(s) on DD statement {fmt_uk_date(dd_date)} as paid?');">
-                    ✅ Mark all {len(rows)} as paid
-                  </button>
-                </div>
-              </form>
-            </div>"""
-        else:
-            body = ("<div class='card' style='margin-top:14px;color:#64748b'>"
-                    f"No unpaid invoices remain for DD statement {fmt_uk_date(dd_date)} — all settled. ✅</div>")
+    STORES = ["Uxbridge", "Newbury"]
+    if store not in STORES:
+        store = ""
 
     flash = ""
     if msg:
@@ -2283,6 +2216,142 @@ def dd_collection(session: str | None = Cookie(default=None),
         bg     = "#f0fdf4" if msg_type == "success" else "#fef2f2"
         flash = (f"<div style='background:{bg};border:1px solid {colour};color:{colour};"
                  f"border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:700'>{msg}</div>")
+
+    store_btns = ""
+    for s in STORES:
+        cls = "btn-primary" if store == s else "btn-secondary"
+        store_btns += (f"<a href='/invoices/dd-collection?store={s}' class='{cls}' "
+                       f"style='padding:8px 18px'>🏪 {s}</a> ")
+
+    body = ""
+    if not store:
+        body = ("<div class='card' style='margin-top:14px;color:#64748b'>"
+                "Pick a store above to reconcile its Direct Debit collections — each store has "
+                "its own bank account and its own DD statements.</div>")
+    else:
+        dates = q(f"""SELECT dd_statement_date d, COUNT(*) n, SUM({_BAL_SQL}) tot
+                      FROM supplier_invoices
+                      WHERE store_name=? AND dd_statement_date IS NOT NULL AND is_paid!='Yes'
+                      GROUP BY dd_statement_date ORDER BY dd_statement_date DESC""",
+                  (store,), fetch=True) or []
+        chips = ""
+        for r in dates:
+            selc = ("background:#0f2942;color:white" if r["d"] == dd_date
+                    else "background:#ecfdf5;color:#047857;border:1px solid #6ee7b7")
+            chips += (f"<a href='/invoices/dd-collection?store={store}&dd_date={r['d']}' "
+                      f"style='{selc};border-radius:8px;padding:6px 12px;margin:3px;font-size:13px;"
+                      f"font-weight:700;text-decoration:none;display:inline-block'>"
+                      f"{fmt_uk_date(r['d'])} · {r['n']} inv · £{(r['tot'] or 0):,.2f}</a>")
+        if not chips:
+            chips = f"<span style='color:#94a3b8;font-size:13px'>No unpaid {store} invoices have a DD statement date.</span>"
+        picker = (f"<div class='card' style='margin-top:12px'>"
+                  f"<div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>"
+                  f"{store} — pick a DD statement date to reconcile:</div>{chips}</div>")
+
+        detail = ""
+        if dd_date:
+            rows = q(f"""SELECT seq_no, supplier_name, invoice_number, {_BAL_SQL} AS balance
+                         FROM supplier_invoices
+                         WHERE store_name=? AND dd_statement_date=? AND is_paid!='Yes'
+                         ORDER BY supplier_name, seq_no""", (store, dd_date), fetch=True) or []
+            total = round(sum(r["balance"] or 0 for r in rows), 2)
+            sup_default = rows[0]["supplier_name"] if rows else ""
+            tr = ""
+            for r in rows:
+                tr += (f"<tr><td class='mono' style='color:#94a3b8;font-size:12px'>{r['seq_no'] or ''}</td>"
+                       f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
+                       f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
+                       f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['balance'] or 0):,.2f}</td></tr>")
+
+            st = q("SELECT dd_id, orig_name FROM dd_statements WHERE store_name=? AND dd_date=? ORDER BY dd_id DESC LIMIT 1",
+                   (store, dd_date), fetch=True)
+            if st:
+                std = dict(st[0])
+                stmt_html = (f"<div style='font-size:12px'>📄 DD statement attached: "
+                             f"<a href='/invoices/dd-collection/statement/{std['dd_id']}' target='_blank' "
+                             f"style='color:#1e3a5f;font-weight:700'>{html.escape(std['orig_name'] or 'view')}</a></div>")
+            else:
+                stmt_html = ("<form method='POST' action='/invoices/dd-collection/attach' "
+                             "enctype='multipart/form-data' style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
+                             f"<input type='hidden' name='store' value='{store}'>"
+                             f"<input type='hidden' name='dd_date' value='{dd_date}'>"
+                             "<span style='font-size:12px;color:#64748b'>Attach the DD statement:</span>"
+                             "<input type='file' name='statement' accept='.pdf,.png,.jpg,.jpeg' style='font-size:12px'>"
+                             "<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>📎 Attach</button></form>")
+
+            if rows:
+                _def_note = html.escape(f"Credit applied on DD {fmt_uk_date(dd_date)}, no CN document received, not queried")
+                detail = f"""
+                <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
+                  <div style='padding:14px 18px;background:#0f2942;color:white;font-weight:700'>
+                    {store} · DD Statement {fmt_uk_date(dd_date)} — {len(rows)} invoice(s)
+                  </div>
+                  <div style='overflow-x:auto'>
+                    <table class='tbl'>
+                      <thead><tr><th>Serial</th><th>Supplier</th><th>Invoice No.</th>
+                        <th style='text-align:right'>Balance</th></tr></thead>
+                      <tbody>{tr}</tbody>
+                      <tfoot><tr style='background:#f0fdf4'>
+                        <td colspan='3' style='text-align:right;font-weight:900'>App total for this collection:</td>
+                        <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
+                      </tr></tfoot>
+                    </table>
+                  </div>
+                  <div style='padding:12px 18px;border-top:1px solid #eef2f7'>{stmt_html}</div>
+                  <div style='padding:12px 18px;background:#fffbeb;border-top:1px solid #fde68a'>
+                    <div style='font-size:12px;font-weight:700;color:#92400e;margin-bottom:6px'>
+                      Statement total lower than the app total? Add the missing credit (e.g. a credit the supplier
+                      applied but you have no CN for) so it reconciles:</div>
+                    <form method='POST' action='/invoices/dd-collection/add-credit'
+                          style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>
+                      <input type='hidden' name='store' value='{store}'>
+                      <input type='hidden' name='dd_date' value='{dd_date}'>
+                      <input type='text' name='supplier' value='{html.escape(sup_default)}' placeholder='Supplier'
+                             style='font-size:12px;padding:3px 6px'>
+                      <span style='font-size:12px'>Credit £</span>
+                      <input type='number' step='0.01' name='amount' placeholder='67.20'
+                             style='font-size:12px;padding:3px 6px;width:90px'>
+                      <input type='text' name='note' value='{_def_note}'
+                             style='font-size:12px;padding:3px 6px;flex:1;min-width:220px'>
+                      <button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>➕ Add credit</button>
+                    </form>
+                  </div>
+                  <form method='POST' action='/invoices/dd-collection/mark-paid' style='padding:16px 18px;background:#f8fafc'>
+                    <input type='hidden' name='store' value='{store}'>
+                    <input type='hidden' name='dd_date' value='{dd_date}'>
+                    <div class='text-xs font-bold text-slate-500 uppercase tracking-wide mb-3'>Mark this collection paid</div>
+                    <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(160px,1fr))'>
+                      <div><label>Bank debit date</label>
+                        <input type='date' name='bank_debit_date' value='{dd_date}'></div>
+                      <div><label>Amount the bank collected (£)</label>
+                        <input type='number' step='0.01' id='ddActual' name='actual_amount' value='{total:.2f}' oninput='ddCalc()'></div>
+                      <div><label>Difference vs app total</label>
+                        <div id='ddDiff' style='font-weight:900;padding-top:9px'>£0.00</div></div>
+                      <div style='grid-column:1/-1'><label>Note (explains any difference)</label>
+                        <input type='text' name='note' placeholder='Optional'></div>
+                    </div>
+                    <div style='margin-top:12px'>
+                      <button type='submit' class='btn-primary'
+                        onclick="return confirm('Mark all {len(rows)} {store} invoice(s) on DD statement {fmt_uk_date(dd_date)} as paid?');">
+                        ✅ Mark all {len(rows)} as paid
+                      </button>
+                    </div>
+                  </form>
+                </div>
+                <script>
+                function ddCalc(){{
+                  var a=parseFloat(document.getElementById('ddActual').value||0);
+                  var d=a-({total});
+                  var el=document.getElementById('ddDiff');
+                  el.textContent=(d>=0?'+':'-')+'£'+Math.abs(d).toFixed(2);
+                  el.style.color=Math.abs(d)<0.005?'#16a34a':'#b45309';
+                }}
+                document.addEventListener('DOMContentLoaded',ddCalc);
+                </script>"""
+            else:
+                detail = ("<div class='card' style='margin-top:14px;color:#64748b'>"
+                          f"No unpaid {store} invoices remain for DD statement {fmt_uk_date(dd_date)} — all settled. ✅</div>")
+        body = picker + detail
 
     content = f"""
     {flash}
@@ -2292,9 +2361,8 @@ def dd_collection(session: str | None = Cookie(default=None),
     </div>
     <div class='card' style='margin-top:12px'>
       <div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>
-        Pick a DD statement date to reconcile:
-      </div>
-      {chips}
+        Which store's DD statement are you reconciling?</div>
+      {store_btns}
     </div>
     {body}"""
     return page("DD Collection Check", content, user, "invoices")
@@ -2308,6 +2376,7 @@ async def dd_collection_mark_paid(request: Request, session: str | None = Cookie
         return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
 
     form      = await request.form()
+    store     = (form.get("store") or "").strip()
     dd_date   = (form.get("dd_date") or "").strip()
     bank_date = (form.get("bank_debit_date") or "").strip() or dd_date
     note      = (form.get("note") or "").strip()
@@ -2318,9 +2387,14 @@ async def dd_collection_mark_paid(request: Request, session: str | None = Cookie
     if not dd_date:
         return RedirectResponse("/invoices/dd-collection", status_code=303)
 
+    # Only this store's invoices for the statement date (each store = its own account)
+    where = "dd_statement_date=? AND is_paid!='Yes'"
+    params = [dd_date]
+    if store:
+        where += " AND store_name=?"; params.append(store)
     rows = q(f"""SELECT invoice_id, comments, {_BAL_SQL} AS balance
-                 FROM supplier_invoices WHERE dd_statement_date=? AND is_paid!='Yes'""",
-             (dd_date,), fetch=True) or []
+                 FROM supplier_invoices WHERE {where}""",
+             tuple(params), fetch=True) or []
     total = round(sum(r["balance"] or 0 for r in rows), 2)
     diff  = round(actual - total, 2) if actual else 0.0
 
@@ -2348,12 +2422,86 @@ async def dd_collection_mark_paid(request: Request, session: str | None = Cookie
           (bank_date, new_comments, user.get("username", ""), now_ts, r["invoice_id"]))
 
     from urllib.parse import quote as urlquote
-    msg = (f"Marked {len(rows)} invoice(s) paid for DD statement {fmt_uk_date(dd_date)} "
+    msg = (f"Marked {len(rows)} {store} invoice(s) paid for DD statement {fmt_uk_date(dd_date)} "
            f"(paid {fmt_uk_date(bank_date)}).")
     if diff:
         msg += f" Difference of £{diff:+.2f} noted."
-    return RedirectResponse(f"/invoices/dd-collection?msg={urlquote(msg)}&msg_type=success",
+    return RedirectResponse(f"/invoices/dd-collection?store={store}&msg={urlquote(msg)}&msg_type=success",
                             status_code=303)
+
+
+@router.post("/invoices/dd-collection/add-credit")
+async def dd_add_credit(request: Request, session: str | None = Cookie(default=None)):
+    """Add a missing credit as a negative-gross line, tagged to a store's DD statement,
+    so the collection reconciles. Editable later if the real credit note surfaces."""
+    from urllib.parse import quote as urlquote
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+    form     = await request.form()
+    store    = (form.get("store") or "").strip()
+    dd_date  = (form.get("dd_date") or "").strip()
+    supplier = (form.get("supplier") or "").strip()
+    note     = (form.get("note") or "").strip()
+    try:    amount = abs(float(form.get("amount") or 0))
+    except (TypeError, ValueError): amount = 0.0
+    back = f"/invoices/dd-collection?store={store}&dd_date={dd_date}"
+    if not (store and dd_date and supplier and amount):
+        return RedirectResponse(back + "&msg=" + urlquote("Enter a supplier and a credit amount") + "&msg_type=error",
+                                status_code=303)
+    mx  = q("SELECT MAX(seq_no) AS m FROM supplier_invoices", (), fetch=True)
+    seq = ((dict(mx[0]).get("m") or 0) + 1) if mx else 1
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    q("""INSERT INTO supplier_invoices
+            (seq_no, supplier_name, store_name, invoice_date, gross_amount, vat_amount,
+             net_amount, dd_statement_date, payment_method, is_paid, comments,
+             approval_status, submitted_by, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+      (seq, supplier, store, dd_date, -amount, 0, -amount, dd_date, "Direct Debit",
+       "No", note or None, "approved", user.get("username", ""), now_ts))
+    return RedirectResponse(back + "&msg=" + urlquote(f"Added credit -£{amount:.2f} ({supplier}) as serial {seq}"),
+                            status_code=303)
+
+
+@router.post("/invoices/dd-collection/attach")
+async def dd_attach(request: Request, session: str | None = Cookie(default=None)):
+    """Attach a store's DD collection statement (the supplier's DD advice) to a date."""
+    from urllib.parse import quote as urlquote
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+    form    = await request.form()
+    store   = (form.get("store") or "").strip()
+    dd_date = (form.get("dd_date") or "").strip()
+    f       = form.get("statement")
+    back    = f"/invoices/dd-collection?store={store}&dd_date={dd_date}"
+    if not (store and dd_date and f and hasattr(f, "filename") and f.filename):
+        return RedirectResponse(back + "&msg=" + urlquote("No file chosen") + "&msg_type=error", status_code=303)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    ext  = os.path.splitext(f.filename)[1].lower()
+    full = os.path.join(UPLOAD_DIR, f"dd_{uuid.uuid4().hex}{ext}")
+    with open(full, "wb") as out:
+        out.write(await f.read())
+    q("""INSERT INTO dd_statements (store_name, dd_date, file_path, orig_name, uploaded_by)
+         VALUES (?,?,?,?,?)""", (store, dd_date, full, f.filename, user.get("username", "")))
+    return RedirectResponse(back + "&msg=" + urlquote("DD statement attached"), status_code=303)
+
+
+@router.get("/invoices/dd-collection/statement/{dd_id}")
+def dd_statement_serve(dd_id: int, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if user.get("role") != "owner":
+        return HTMLResponse("<p>Owner only</p>", status_code=403)
+    rows = q("SELECT file_path FROM dd_statements WHERE dd_id=?", (dd_id,), fetch=True)
+    if not rows or not rows[0]["file_path"] or not os.path.exists(rows[0]["file_path"]):
+        return HTMLResponse("<p>Statement not found</p>", status_code=404)
+    path = rows[0]["file_path"]; ext = os.path.splitext(path)[1].lower()
+    mt = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+          ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
+    return FileResponse(path, media_type=mt)
 
 
 @router.get("/invoices/accountant-batch", response_class=HTMLResponse)
