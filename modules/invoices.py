@@ -2958,14 +2958,26 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
         capped_note = (f"<div style='color:#b45309;font-size:12px;padding:8px 18px'>"
                        f"Showing the first 1,000 of {true_count:,} — the batch total above covers all of them."
                        f"</div>") if true_count > len(rows) else ""
-        tr = "".join(
-            f"<tr><td>{acct_serial_link(r['src'] == 'Property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
-            f"<td style='font-size:12px'>{r['loc']}</td>"
-            f"<td style='font-weight:700'>{r['supplier_name']}</td>"
-            f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
-            f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
-            f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>"
-            for r in rows)
+        # Each store is a SEPARATE Ltd company (and gets its own accountant PDF),
+        # so group the list by store/property with a header + subtotal per group,
+        # rather than one undivided run. Rows are already ordered by loc.
+        from itertools import groupby
+        tr = ""
+        for loc, grp in groupby(rows, key=lambda r: r["loc"] or "—"):
+            grp = list(grp)
+            sub = sum((x["gross_amount"] or 0) for x in grp)
+            tr += (f"<tr style='background:#0f2942'><td colspan='5' style='color:white;"
+                   f"font-weight:800;font-size:13px;padding:8px 14px'>🏢 {html.escape(loc)} "
+                   f"— {len(grp)} invoice(s)</td></tr>")
+            for r in grp:
+                tr += (f"<tr><td>{acct_serial_link(r['src'] == 'Property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
+                       f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
+                       f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
+                       f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
+                       f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
+            tr += (f"<tr style='background:#eef4fb'><td colspan='4' style='text-align:right;"
+                   f"font-weight:800'>{html.escape(loc)} subtotal:</td>"
+                   f"<td class='mono' style='text-align:right;font-weight:800;color:#0f2942'>£{sub:,.2f}</td></tr>")
         body = f"""
         <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
           <div style='padding:14px 18px;background:#0f2942;color:white;font-weight:700'>
@@ -2974,11 +2986,11 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
           {capped_note}
           <div style='overflow-x:auto'>
             <table class='tbl'>
-              <thead><tr><th>Serial</th><th>Store/Property</th><th>Supplier</th>
+              <thead><tr><th>Serial</th><th>Supplier</th>
                 <th>Invoice No.</th><th>Inv. Date</th><th style='text-align:right'>Gross</th></tr></thead>
               <tbody>{tr}</tbody>
               <tfoot><tr style='background:#f0fdf4'>
-                <td colspan='5' style='text-align:right;font-weight:900'>Batch total:</td>
+                <td colspan='4' style='text-align:right;font-weight:900'>Batch total (all stores):</td>
                 <td class='mono' style='text-align:right;font-weight:900;color:#047857'>£{total:,.2f}</td>
               </tr></tfoot>
             </table>
