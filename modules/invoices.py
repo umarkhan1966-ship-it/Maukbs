@@ -745,8 +745,14 @@ def invoices_page(
     # Thumbnail preview of the attached PDF (edit mode, when a file is attached)
     pdf_preview = ""
     if is_edit and inv.get("pdf_path"):
-        thumb_url = f"/invoices/pdf-thumb/{edit_id}?ledger={ledger}"
-        full_url  = f"/invoices/pdf/{edit_id}?ledger={ledger}"
+        # cache-buster (?v=file-mtime): the preview re-fetches whenever the PDF file
+        # changes (e.g. after removing a page) instead of showing a stale cached copy
+        try:
+            _v = f"&v={int(os.path.getmtime(inv['pdf_path']))}"
+        except Exception:
+            _v = ""
+        thumb_url = f"/invoices/pdf-thumb/{edit_id}?ledger={ledger}{_v}"
+        full_url  = f"/invoices/pdf/{edit_id}?ledger={ledger}{_v}"
         # Count pages so we can offer to remove a stray page (e.g. a store report
         # scanned in with the invoice) without deleting and re-attaching the whole PDF.
         page_count = 0
