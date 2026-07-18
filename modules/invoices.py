@@ -2196,7 +2196,8 @@ _BAL_SQL = "COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_not
 
 @router.get("/invoices/dd-collection", response_class=HTMLResponse)
 def dd_collection(session: str | None = Cookie(default=None),
-                  store: str = "", dd_date: str = "", msg: str = "", msg_type: str = "success"):
+                  store: str = "", dd_date: str = "", show_stmt: str = "",
+                  msg: str = "", msg_type: str = "success"):
     """Owner-only DD reconciliation, ONE STORE at a time (each store is a separate
     bank account with its own DD statements): pick a store, pick a statement date,
     see that store's invoices for it + total, add any missing credit, attach the
@@ -2280,8 +2281,9 @@ def dd_collection(session: str | None = Cookie(default=None),
             if st:
                 std = dict(st[0])
                 stmt_html = (f"<div style='font-size:12px'>📄 DD statement attached: "
-                             f"<a href='/invoices/dd-collection/statement/{std['dd_id']}' target='_blank' "
-                             f"style='color:#1e3a5f;font-weight:700'>{html.escape(std['orig_name'] or 'view')}</a></div>")
+                             f"<a href='#' onclick=\"ddShowPdf('/invoices/dd-collection/statement/{std['dd_id']}');return false;\" "
+                             f"style='color:#1e3a5f;font-weight:700'>{html.escape(std['orig_name'] or 'view')}</a> "
+                             f"<span style='color:#94a3b8'>(opens side-by-side →)</span></div>")
             else:
                 stmt_html = ("<form method='POST' action='/invoices/dd-collection/attach' "
                              "enctype='multipart/form-data' style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
@@ -2376,8 +2378,8 @@ def dd_collection(session: str | None = Cookie(default=None),
                                 f"<td style='font-weight:700'>{html.escape(r['supplier_name'] or '')}</td>"
                                 f"<td class='mono' style='font-size:12px'>{html.escape(r['invoice_number'] or '—')}</td>"
                                 f"<td class='mono' style='text-align:right;font-weight:700'>£{(r['amt'] or 0):,.2f}</td></tr>")
-                    stmt_view = (f"<a href='/invoices/dd-collection/statement/{dict(st[0])['dd_id']}' target='_blank' "
-                                 f"style='color:#1e3a5f;font-weight:700'>📄 View attached statement "
+                    stmt_view = (f"<a href='#' onclick=\"ddShowPdf('/invoices/dd-collection/statement/{dict(st[0])['dd_id']}');return false;\" "
+                                 f"style='color:#1e3a5f;font-weight:700'>📄 View attached statement side-by-side "
                                  f"({html.escape(dict(st[0]).get('orig_name') or 'file')})</a>"
                                  if st else "<span style='color:#94a3b8;font-size:12px'>No statement attached.</span>")
                     detail = f"""
@@ -2400,6 +2402,30 @@ def dd_collection(session: str | None = Cookie(default=None),
                               f"Nothing to show for {store} DD {fmt_uk_date(dd_date)}.</div>")
         body = picker + detail
 
+    # Side-by-side statement viewer (like the invoice PDF panel): opens the DD
+    # statement on the right so it can be read while reconciling on the left.
+    dd_panel = """
+    <div id="ddPdfPanel" style="display:none;position:fixed;top:0;right:0;width:46%;height:100vh;
+         background:#fff;box-shadow:-4px 0 20px rgba(0,0,0,.18);z-index:70;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#0f2942;color:#fff">
+        <span style="font-weight:700;font-size:13px">&#128196; DD statement</span>
+        <button onclick="ddClosePdf()" class="btn-secondary" style="padding:3px 12px;font-size:12px">&#10005; Close</button>
+      </div>
+      <iframe id="ddPdfFrame" src="" style="flex:1;width:100%;border:none"></iframe>
+    </div>
+    <script>
+    function ddShowPdf(u){var p=document.getElementById('ddPdfPanel');document.getElementById('ddPdfFrame').src=u;p.style.display='flex';}
+    function ddClosePdf(){var p=document.getElementById('ddPdfPanel');p.style.display='none';document.getElementById('ddPdfFrame').src='';}
+    </script>"""
+    # Auto-open the statement (side-by-side) right after it's attached.
+    auto_open = ""
+    if show_stmt and store and dd_date:
+        _s = q("SELECT dd_id FROM dd_statements WHERE store_name=? AND dd_date=? ORDER BY dd_id DESC LIMIT 1",
+               (store, dd_date), fetch=True)
+        if _s:
+            auto_open = (f"<script>document.addEventListener('DOMContentLoaded',function(){{"
+                         f"ddShowPdf('/invoices/dd-collection/statement/{dict(_s[0])['dd_id']}');}});</script>")
+
     content = f"""
     {flash}
     <div class='flex justify-between items-center'>
@@ -2411,7 +2437,8 @@ def dd_collection(session: str | None = Cookie(default=None),
         Which store's DD statement are you reconciling?</div>
       {store_btns}
     </div>
-    {body}"""
+    {body}
+    {dd_panel}{auto_open}"""
     return page("DD Collection Check", content, user, "invoices")
 
 
@@ -2533,7 +2560,7 @@ async def dd_attach(request: Request, session: str | None = Cookie(default=None)
         out.write(await f.read())
     q("""INSERT INTO dd_statements (store_name, dd_date, file_path, orig_name, uploaded_by)
          VALUES (?,?,?,?,?)""", (store, dd_date, full, f.filename, user.get("username", "")))
-    return RedirectResponse(back + "&msg=" + urlquote("DD statement attached"), status_code=303)
+    return RedirectResponse(back + "&show_stmt=1&msg=" + urlquote("DD statement attached"), status_code=303)
 
 
 @router.get("/invoices/dd-collection/statement/{dd_id}")
