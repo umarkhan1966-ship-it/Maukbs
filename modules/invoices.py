@@ -2275,9 +2275,19 @@ def dd_collection(session: str | None = Cookie(default=None),
                        f"font-weight:700;text-decoration:none;display:inline-block'>📄 {fmt_uk_date(r['dd_date'])}</a>")
         recon_html = (f"<div style='margin-top:12px;font-size:12px;font-weight:700;color:#64748b'>"
                       f"Reconciled (statement on file — click to review):</div>{rchips}") if rchips else ""
+        # Jump straight to any collection date — including a FULLY-PAID one with no
+        # statement yet (e.g. a migrated collection), which has no chip of its own.
+        date_go = (f"<form method='GET' action='/invoices/dd-collection' "
+                   f"style='display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:12px;"
+                   f"padding-top:10px;border-top:1px dashed #e2e8f0'>"
+                   f"<input type='hidden' name='store' value='{store}'>"
+                   f"<span style='font-size:12px;color:#64748b'>Or open a specific collection date "
+                   f"(e.g. to attach a statement to a past, already-paid one):</span>"
+                   f"<input type='date' name='dd_date' value='{dd_date}' style='font-size:12px'>"
+                   f"<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>Go →</button></form>")
         picker = (f"<div class='card' style='margin-top:12px'>"
                   f"<div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>"
-                  f"{store} — pick a DD statement date to reconcile:</div>{chips}{recon_html}</div>")
+                  f"{store} — pick a DD statement date to reconcile:</div>{chips}{recon_html}{date_go}</div>")
 
         detail = ""
         if dd_date:
