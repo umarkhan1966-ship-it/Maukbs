@@ -2277,14 +2277,22 @@ def dd_collection(session: str | None = Cookie(default=None),
                       f"Reconciled (statement on file — click to review):</div>{rchips}") if rchips else ""
         # Jump straight to any collection date — including a FULLY-PAID one with no
         # statement yet (e.g. a migrated collection), which has no chip of its own.
-        date_go = (f"<form method='GET' action='/invoices/dd-collection' "
-                   f"style='display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:12px;"
-                   f"padding-top:10px;border-top:1px dashed #e2e8f0'>"
-                   f"<input type='hidden' name='store' value='{store}'>"
-                   f"<span style='font-size:12px;color:#64748b'>Or open a specific collection date "
-                   f"(e.g. to attach a statement to a past, already-paid one):</span>"
-                   f"<input type='date' name='dd_date' value='{dd_date}' style='font-size:12px'>"
-                   f"<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>Go →</button></form>")
+        # Highlighted + clearly labelled because it's an occasional, special-purpose
+        # tool (not the normal reconciliation path — that's the chips above).
+        date_go = (
+            "<div style='margin-top:14px;padding:10px 12px;background:#eff6ff;"
+            "border:1px solid #bfdbfe;border-radius:8px'>"
+            "<div style='font-size:12px;font-weight:800;color:#1e40af;margin-bottom:4px'>"
+            "🔎 Open an already-paid collection (occasional use)</div>"
+            "<div style='font-size:11px;color:#475569;margin-bottom:8px'>Use this <b>only</b> to reach a "
+            "<b>past collection that's already paid/reconciled</b> and so has no chip above — e.g. to attach "
+            "or view its DD statement. For normal reconciling, use the date chips above.</div>"
+            f"<form method='GET' action='/invoices/dd-collection' "
+            f"style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
+            f"<input type='hidden' name='store' value='{store}'>"
+            f"<input type='date' name='dd_date' value='{dd_date}' style='font-size:12px'>"
+            f"<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>Go →</button>"
+            "</form></div>")
         picker = (f"<div class='card' style='margin-top:12px'>"
                   f"<div style='font-size:13px;font-weight:700;color:#334155;margin-bottom:8px'>"
                   f"{store} — pick a DD statement date to reconcile:</div>{chips}{recon_html}{date_go}</div>")
