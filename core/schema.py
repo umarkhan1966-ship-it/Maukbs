@@ -278,6 +278,25 @@ def init_db():
         )
     """)
 
+    # ── DD reconciliation summary, one row per (store, DD date) ──
+    # Records what the BANK actually collected for a DD collection (which can
+    # differ from the app total by a rounding penny), plus the app total at the
+    # time and the reconciler's note. Written when a collection is marked paid;
+    # read by the reconciled view so the App/Bank/Difference is visible without
+    # opening an invoice.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS dd_collections (
+            store_name       TEXT NOT NULL,
+            dd_date          TEXT NOT NULL,
+            app_total        REAL,
+            collected_amount REAL,
+            note             TEXT,
+            reconciled_by    TEXT,
+            reconciled_at    TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (store_name, dd_date)
+        )
+    """)
+
     # ── Company legal entities: ALL of Umar's own trading entities in ONE place ──
     # Retail stores AND property companies. Every screen that shows a company name
     # (contracts, offer letters, onboarding forms, the property ledger) reads from

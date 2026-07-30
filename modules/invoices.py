@@ -2454,6 +2454,28 @@ def dd_collection(session: str | None = Cookie(default=None),
                                      "<span style='font-size:12px;color:#64748b'>No statement attached — add one:</span>"
                                      "<input type='file' name='statement' accept='.pdf,.png,.jpg,.jpeg' style='font-size:12px'>"
                                      "<button type='submit' class='btn-secondary' style='padding:3px 10px;font-size:11px'>📎 Attach</button></form>")
+                    # Reconciliation summary: what the BANK actually took vs the app
+                    # total (they can differ by a rounding penny). Shown only when a
+                    # stored figure exists (collections reconciled from now on, or
+                    # backfilled) — older ones just show the app total below.
+                    _rec = q("SELECT collected_amount, note FROM dd_collections WHERE store_name=? AND dd_date=?",
+                             (store, dd_date), fetch=True)
+                    recon_summary = ""
+                    if _rec and dict(_rec[0]).get("collected_amount") is not None:
+                        _rr   = dict(_rec[0])
+                        _coll = _rr["collected_amount"] or 0
+                        _dv   = round(_coll - ptot, 2)
+                        _dcol = "#16a34a" if abs(_dv) < 0.005 else "#b45309"
+                        _sign = "+" if _dv >= 0 else "-"
+                        _noteline = (f"<div style='color:#64748b;margin-top:4px'>Note: {html.escape(_rr.get('note') or '')}</div>"
+                                     if (_rr.get('note') or '').strip() else "")
+                        recon_summary = (
+                            "<div style='padding:10px 18px;border-top:1px solid #eef2f7;font-size:13px;background:#f8fafc'>"
+                            f"<span style='color:#64748b'>Bank actually collected:</span> <b>£{_coll:,.2f}</b> "
+                            "&nbsp;·&nbsp; "
+                            f"<span style='color:#64748b'>Difference vs app:</span> "
+                            f"<b style='color:{_dcol}'>{_sign}£{abs(_dv):,.2f}</b>"
+                            f"{_noteline}</div>")
                     detail = f"""
                     <div class='card' style='margin-top:14px;padding:0;overflow:hidden'>
                       <div style='padding:14px 18px;background:#334155;color:white;font-weight:700'>
@@ -2464,9 +2486,10 @@ def dd_collection(session: str | None = Cookie(default=None),
                           <th style='text-align:right'>Paid</th></tr></thead>
                         <tbody>{ptr}</tbody>
                         <tfoot><tr style='background:#f8fafc'>
-                          <td colspan='3' style='text-align:right;font-weight:900'>Collected total:</td>
+                          <td colspan='3' style='text-align:right;font-weight:900'>Total (per app):</td>
                           <td class='mono' style='text-align:right;font-weight:900'>£{ptot:,.2f}</td></tr></tfoot>
                       </table></div>
+                      {recon_summary}
                       <div style='padding:12px 18px;border-top:1px solid #eef2f7'>{stmt_view}</div>
                     </div>"""
                 else:
@@ -2616,6 +2639,18 @@ async def dd_collection_mark_paid(request: Request, session: str | None = Cookie
                 comments=?, updated_by=?, updated_at=?
              WHERE invoice_id=?""",
           (bank_date, new_comments, user.get("username", ""), now_ts, r["invoice_id"]))
+
+    # Record the reconciliation summary (App total vs what the BANK actually took,
+    # plus any note) so the reconciled view can show it without opening an invoice.
+    # Only when at least one invoice was just settled here.
+    if rows:
+        q("""INSERT INTO dd_collections (store_name, dd_date, app_total, collected_amount, note, reconciled_by, reconciled_at)
+             VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(store_name, dd_date) DO UPDATE SET
+                app_total=excluded.app_total, collected_amount=excluded.collected_amount,
+                note=excluded.note, reconciled_by=excluded.reconciled_by, reconciled_at=excluded.reconciled_at""",
+          (store, dd_date, total, (actual if actual else total), (note or None),
+           user.get("username", ""), now_ts))
 
     from urllib.parse import quote as urlquote
     msg = (f"Marked {len(rows)} {store} invoice(s) paid for DD statement {fmt_uk_date(dd_date)} "
