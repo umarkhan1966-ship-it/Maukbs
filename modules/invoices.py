@@ -407,7 +407,9 @@ def fetch_invoices(ledger: str, search: str, status: str,
     elif status == "awaiting":
         conds.append("awaiting_invoice = 'Yes'")
     elif status == "credits":
-        conds.append("gross_amount < 0 AND (linked_ref IS NULL OR linked_ref='')")
+        # Only credits still genuinely available to use: a credit note that's been
+        # settled (paid — e.g. collected on a DD statement) is used up, so exclude it.
+        conds.append("gross_amount < 0 AND (linked_ref IS NULL OR linked_ref='') AND is_paid != 'Yes'")
     elif status == "query":
         conds.append("under_query = 'Yes'")
     else:
@@ -949,12 +951,21 @@ def invoices_page(
         _g = row['gross_amount'] or 0
         gross_str = (f"-£{abs(_g):,.2f}" if _g < 0 else f"£{_g:,.2f}")
         gross_col = "#dc2626" if _g < 0 else "#0f172a"
-        # For a credit note, the status badge shows whether it's been applied
-        # (linked to an invoice) or is still an available credit.
+        # For a credit note, the badge reflects whether it's still usable:
+        #  - linked to an invoice          -> APPLIED
+        #  - settled/paid (e.g. collected on a DD statement, or refunded) -> SETTLED
+        #    (it's been used up, even without a link to one specific invoice —
+        #     the Max Spielmann case, where credits aren't invoice-specific)
+        #  - otherwise (unpaid + unlinked) -> genuinely AVAILABLE
         if _g < 0:
             if (row.get('linked_ref') or '').strip():
                 badge = ("<span style='background:#dcfce7;color:#16a34a;font-size:11px;font-weight:700;"
                          "padding:2px 8px;border-radius:6px'>✔ CN APPLIED</span>")
+            elif row.get('is_paid') == 'Yes':
+                _ddx  = row.get('dd_statement_date')
+                _slbl = f"✔ SETTLED · DD {fmt_uk_date(_ddx)}" if _ddx else "✔ CN SETTLED"
+                badge = ("<span style='background:#f1f5f9;color:#475569;font-size:11px;font-weight:700;"
+                         f"padding:2px 8px;border-radius:6px'>{_slbl}</span>")
             else:
                 badge = ("<span style='background:#dbeafe;color:#1e40af;font-size:11px;font-weight:700;"
                          "padding:2px 8px;border-radius:6px'>CREDIT · AVAILABLE</span>")
