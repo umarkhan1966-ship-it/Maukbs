@@ -284,7 +284,7 @@ def init_db():
     # time and the reconciler's note. Written when a collection is marked paid;
     # read by the reconciled view so the App/Bank/Difference is visible without
     # opening an invoice.
-    cur.execute("""
+    c.execute("""
         CREATE TABLE IF NOT EXISTS dd_collections (
             store_name       TEXT NOT NULL,
             dd_date          TEXT NOT NULL,
