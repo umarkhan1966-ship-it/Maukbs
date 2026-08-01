@@ -1998,9 +1998,21 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
                 for t, v, sub, col in spec)
             return (f"<div style='font-size:12px;font-weight:800;color:#334155;margin:16px 0 6px'>{label}</div>"
                     f"<div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(120px,1fr))'>{inner}</div>")
-        cards = (_cards(f"This year ({cur_year})", _summary("AND substr(work_date,1,4)=?", [cur_year]))
-                 + _cards("All time (from start)", _summary("", [])))
+        # Year selector — drives BOTH the summary and the daily list below.
+        years = [r["yr"] for r in q("SELECT DISTINCT substr(work_date,1,4) yr FROM staff_attendance "
+                                    "WHERE staff_id=? ORDER BY yr DESC", (staff_id,), fetch=True) or []]
+        sel = year if year in years else (cur_year if cur_year in years else (years[0] if years else cur_year))
+        def _chip(y):
+            on = (y == sel)
+            st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
+            return (f"<a href='/staff/{staff_id}/attendance?year={y}&view={view}' style='{st};padding:5px 14px;"
+                    f"border-radius:999px;font-weight:700;font-size:13px;text-decoration:none'>{y}</a>")
+        chips = " ".join(_chip(y) for y in years)
 
+        # Summary reflects the SELECTED year.
+        cards = _cards(f"Summary — {sel}", _summary("AND substr(work_date,1,4)=?", [sel]))
+
+        # Lifetime totals, one row per year.
         yr = q("""SELECT substr(work_date,1,4) yr,
                     SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END) w,
                     COALESCE(SUM(CASE WHEN status='Worked' THEN hours_worked ELSE 0 END),0) hw,
@@ -2011,7 +2023,7 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
                   FROM staff_attendance WHERE staff_id=? GROUP BY yr ORDER BY yr DESC""",
                (staff_id,), fetch=True) or []
         yr_html = "".join(
-            f"<tr><td class='mono' style='font-weight:700'>{r['yr']}</td>"
+            f"<tr style='{'background:#eff6ff' if r['yr']==sel else ''}'><td class='mono' style='font-weight:700'>{r['yr']}</td>"
             f"<td class='mono' style='text-align:right'>{r['w']}</td>"
             f"<td class='mono' style='text-align:right'>{r['hw']:,.1f}</td>"
             f"<td class='mono' style='text-align:right'>{r['hol']}</td>"
@@ -2019,17 +2031,6 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
             f"<td class='mono' style='text-align:right'>{r['mat']}</td>"
             f"<td class='mono' style='text-align:right'>{r['bh']}</td></tr>" for r in yr)
 
-        # Daily record: filter by YEAR (default current year) so the whole year is
-        # visible, not just the latest 40 — and an "absences only" toggle.
-        years = [r["yr"] for r in q("SELECT DISTINCT substr(work_date,1,4) yr FROM staff_attendance "
-                                    "WHERE staff_id=? ORDER BY yr DESC", (staff_id,), fetch=True) or []]
-        sel = year if year in years else (cur_year if cur_year in years else (years[0] if years else cur_year))
-        def _chip(y):
-            on = (y == sel)
-            st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
-            return (f"<a href='/staff/{staff_id}/attendance?year={y}&view={view}' style='{st};padding:4px 12px;"
-                    f"border-radius:999px;font-weight:700;font-size:12px;text-decoration:none'>{y}</a>")
-        chips = " ".join(_chip(y) for y in years)
         def _vt(v, label):
             on = (v == view)
             st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
@@ -2053,9 +2054,12 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
             f"<td style='font-size:12px;color:#64748b'>{esc(r['comments'] or '')}</td></tr>" for r in det)
 
         body = f"""
+        <div class='card' style='margin-top:14px;padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>
+          <span style='font-size:13px;font-weight:800;color:#334155;margin-right:4px'>Year:</span>{chips}
+        </div>
         {cards}
         <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
-          <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>By year</div>
+          <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>By year (lifetime)</div>
           <div style='overflow-x:auto'><table class='tbl'>
             <thead><tr><th>Year</th><th style='text-align:right'>Worked days</th><th style='text-align:right'>Worked hrs</th>
               <th style='text-align:right'>Holiday</th><th style='text-align:right'>Sick</th>
@@ -2066,9 +2070,6 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
           <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
             <span>Daily record — {sel}</span><span style='display:flex;gap:6px'>{toggle}</span>
-          </div>
-          <div style='padding:10px 16px;background:#f8fafc;display:flex;gap:6px;flex-wrap:wrap;align-items:center'>
-            <span style='font-size:12px;color:#64748b;margin-right:4px'>Year:</span>{chips}
           </div>
           <div style='overflow-x:auto'><table class='tbl'>
             <thead><tr><th>Date</th><th>Day</th><th>Status</th><th style='text-align:right'>Hours</th>
