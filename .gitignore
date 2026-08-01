@@ -42,6 +42,15 @@ Thumbs.db
 *ogin*.txt
 Chat url.txt
 
+# Local chat backups, notes & scratch folders (may contain sensitive discussion — keep OFF GitHub)
+_claude_chat_backups/
+_cleanup/
+Staff Forms/
+Staff Records/
+*.docx.filled
+~$*
+
+
 # Local dev / one-off maintenance scripts (not part of the deployed app)
 /_import_*.py
 /import_*.py
