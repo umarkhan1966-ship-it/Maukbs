@@ -286,6 +286,26 @@ def ensure_staff_tables():
         )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS staff_attendance (
+            att_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_id      INTEGER NOT NULL,
+            work_date     TEXT NOT NULL,
+            day           TEXT,
+            a_type        TEXT,
+            status        TEXT,            -- Worked / Holiday / Sick / Maternity / Bank Holiday
+            sched_start   TEXT,
+            sched_finish  TEXT,
+            clock_in      TEXT,
+            clock_out     TEXT,
+            hours_worked  REAL,            -- = the sheet's D.Hours (decimal)
+            paid_hours    REAL,            -- = the sheet's P.Hours (breaks deducted)
+            comments      TEXT,
+            source        TEXT,
+            UNIQUE(staff_id, work_date),
+            FOREIGN KEY (staff_id) REFERENCES staff_profiles(staff_id)
+        )
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS nmw_rates (
             nmw_id        INTEGER PRIMARY KEY AUTOINCREMENT,
             effective_date TEXT NOT NULL,
@@ -1313,6 +1333,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         {'<a href="/staff/' + str(staff_id) + '/pay-history" class="btn-secondary">💰 Pay History</a>' if can_edit else ''}
         {'<a href="/staff/' + str(staff_id) + '/set-entitlement" class="btn-secondary">⚙️ Set Entitlement</a>' if can_edit else ''}
         <a href='/staff/{staff_id}/documents' class='btn-secondary'>&#128193; Documents</a>
+        {'<a href="/staff/' + str(staff_id) + '/attendance" class="btn-secondary">🕒 Attendance</a>' if can_edit else ''}
         <a href='/staff/{staff_id}/onboarding' class='btn-secondary'>&#128203; Onboarding</a>
       </div>
     </div>
@@ -1934,6 +1955,101 @@ async def save_pay_change(staff_id: int, request: Request, session: str | None =
 
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff/{staff_id}/pay-history?msg={uq('Pay change recorded')}", status_code=303)
+
+
+@router.get("/staff/{staff_id}/attendance", response_class=HTMLResponse)
+def attendance_page(staff_id: int, session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if user["role"] not in ("owner", "manager"):
+        return RedirectResponse("/staff", status_code=303)
+    rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+    if not rows: return RedirectResponse("/staff", status_code=303)
+    s = dict(rows[0]); name = f"{s['first_name']} {s['last_name']}"
+
+    tot = dict(q("SELECT COUNT(*) c, MIN(work_date) mn, MAX(work_date) mx FROM staff_attendance WHERE staff_id=?",
+                 (staff_id,), fetch=True)[0])
+    if not tot["c"]:
+        body = ("<div class='card' style='margin-top:14px;color:#64748b'>No attendance imported for "
+                f"{esc(name)} yet.</div>")
+    else:
+        summ = {dict(r)["status"]: dict(r) for r in q(
+            "SELECT status, COUNT(*) days, COALESCE(SUM(hours_worked),0) hw, COALESCE(SUM(paid_hours),0) ph "
+            "FROM staff_attendance WHERE staff_id=? GROUP BY status", (staff_id,), fetch=True)}
+        def d(k): return summ.get(k, {}).get("days", 0)
+        worked = summ.get("Worked", {})
+        cards = f"""
+        <div class='grid gap-4' style='grid-template-columns:repeat(auto-fit,minmax(140px,1fr))'>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Worked</div>
+            <div style='font-size:26px;font-weight:900;color:#0f2942'>{worked.get('days',0)}</div><div style='font-size:11px;color:#94a3b8'>days · {worked.get('hw',0):,.0f}h</div></div>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Holiday</div>
+            <div style='font-size:26px;font-weight:900;color:#0369a1'>{d('Holiday')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Sick</div>
+            <div style='font-size:26px;font-weight:900;color:#dc2626'>{d('Sick')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Maternity</div>
+            <div style='font-size:26px;font-weight:900;color:#7c3aed'>{d('Maternity')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Bank Hol</div>
+            <div style='font-size:26px;font-weight:900;color:#475569'>{d('Bank Holiday')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
+        </div>"""
+
+        yr = q("""SELECT substr(work_date,1,4) yr,
+                    SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END) w,
+                    COALESCE(SUM(CASE WHEN status='Worked' THEN hours_worked ELSE 0 END),0) hw,
+                    SUM(CASE WHEN status='Holiday' THEN 1 ELSE 0 END) hol,
+                    SUM(CASE WHEN status='Sick' THEN 1 ELSE 0 END) sick,
+                    SUM(CASE WHEN status='Maternity' THEN 1 ELSE 0 END) mat,
+                    SUM(CASE WHEN status='Bank Holiday' THEN 1 ELSE 0 END) bh
+                  FROM staff_attendance WHERE staff_id=? GROUP BY yr ORDER BY yr DESC""",
+               (staff_id,), fetch=True) or []
+        yr_html = "".join(
+            f"<tr><td class='mono' style='font-weight:700'>{r['yr']}</td>"
+            f"<td class='mono' style='text-align:right'>{r['w']}</td>"
+            f"<td class='mono' style='text-align:right'>{r['hw']:,.1f}</td>"
+            f"<td class='mono' style='text-align:right'>{r['hol']}</td>"
+            f"<td class='mono' style='text-align:right'>{r['sick']}</td>"
+            f"<td class='mono' style='text-align:right'>{r['mat']}</td>"
+            f"<td class='mono' style='text-align:right'>{r['bh']}</td></tr>" for r in yr)
+
+        _col = {"Worked":"#16a34a","Holiday":"#0369a1","Sick":"#dc2626","Maternity":"#7c3aed","Bank Holiday":"#475569"}
+        recent = q("""SELECT work_date,day,status,hours_worked,paid_hours,comments
+                      FROM staff_attendance WHERE staff_id=? ORDER BY work_date DESC LIMIT 40""",
+                   (staff_id,), fetch=True) or []
+        rec_html = "".join(
+            f"<tr><td class='mono' style='font-size:12px'>{fmt_uk_date(r['work_date']) if 'fmt_uk_date' in globals() else r['work_date']}</td>"
+            f"<td style='font-size:12px'>{r['day'] or ''}</td>"
+            f"<td><span style='color:{_col.get(r['status'],'#64748b')};font-weight:700;font-size:12px'>{r['status']}</span></td>"
+            f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['hours_worked']) if r['hours_worked'] is not None else '—'}</td>"
+            f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['paid_hours']) if r['paid_hours'] is not None else '—'}</td>"
+            f"<td style='font-size:12px;color:#64748b'>{esc(r['comments'] or '')}</td></tr>" for r in recent)
+
+        body = f"""
+        {cards}
+        <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
+          <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>By year</div>
+          <div style='overflow-x:auto'><table class='tbl'>
+            <thead><tr><th>Year</th><th style='text-align:right'>Worked days</th><th style='text-align:right'>Worked hrs</th>
+              <th style='text-align:right'>Holiday</th><th style='text-align:right'>Sick</th>
+              <th style='text-align:right'>Maternity</th><th style='text-align:right'>Bank Hol</th></tr></thead>
+            <tbody>{yr_html}</tbody>
+          </table></div>
+        </div>
+        <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
+          <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>Recent entries (latest 40)</div>
+          <div style='overflow-x:auto'><table class='tbl'>
+            <thead><tr><th>Date</th><th>Day</th><th>Status</th><th style='text-align:right'>Hours</th>
+              <th style='text-align:right'>Paid</th><th>Comments</th></tr></thead>
+            <tbody>{rec_html}</tbody>
+          </table></div>
+        </div>"""
+
+    content = f"""
+    <div>
+      <a href='/staff/{staff_id}' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to {esc(name)}</a>
+      <div class='text-2xl font-black text-slate-800 mt-1'>🕒 Attendance — {esc(name)}</div>
+      <div style='color:#64748b;font-size:13px'>{tot['c']:,} days on record{(' · ' + str(tot['mn']) + ' → ' + str(tot['mx'])) if tot['c'] else ''}</div>
+    </div>
+    {body}"""
+    return page(f"Attendance — {name}", content, user, "staff")
 
 
 @router.get("/staff/{staff_id}/set-entitlement", response_class=HTMLResponse)
