@@ -1410,6 +1410,31 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
     back_url  = f"/staff/{s['staff_id']}" if is_edit else "/staff"
     sv        = s or {}
 
+    # Staff number is SYSTEM-GENERATED (next free number in sequence) and read-only,
+    # so it's always unique and can't be mistyped into a clash.
+    import json as _json
+    _next_no = (q("SELECT MAX(staff_number) m FROM staff_profiles", fetch=True)[0]["m"] or 0) + 1
+    if is_edit:
+        _staff_number_field = (
+            "<div><label>Staff Number</label>"
+            f"<input type='text' name='staff_number' value='{esc(sv.get('staff_number') or '')}' readonly "
+            "style='background:#f8fafc;color:#64748b' title='Permanent staff number — not editable'></div>")
+    else:
+        _staff_number_field = (
+            "<div><label>Staff Number</label>"
+            f"<input type='text' name='staff_number' value='{_next_no}' readonly "
+            "style='background:#f8fafc;color:#64748b' title='Assigned automatically'>"
+            "<div style='font-size:11px;color:#94a3b8;margin-top:2px'>Assigned automatically (next in sequence)</div></div>")
+
+    # Soft duplicate-NAME warning on ADD (never a hard block — same/similar names
+    # happen with rejoiners and coincidences; the owner decides).
+    _exist = {}
+    for _r in (q("SELECT first_name,last_name,store_name,date_joined,is_active FROM staff_profiles", fetch=True) or []):
+        _d = dict(_r)
+        _key = f"{(_d['first_name'] or '').strip().lower()}|{(_d['last_name'] or '').strip().lower()}"
+        _exist[_key] = f"{_d.get('store_name') or '?'}, joined {_d.get('date_joined') or '?'}, {'Active' if _d.get('is_active') else 'Left'}"
+    _exist_json = _json.dumps(_exist)
+
     def fi(name, label, ftype="text", val=None, req=False, opts=None, disabled=False, placeholder=""):
         safe = val if val is not None else ""
         req_a = "required" if req else ""
@@ -1451,7 +1476,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
     <div class='card'>
       <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Employment Details</div>
       <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(200px,1fr))'>
-        {fi('staff_number','Staff Number','number',sv.get('staff_number'))}
+        {_staff_number_field}
         {fi('store_name','Store',opts=store_opts,val=sv.get('store_name'),req=True)}
         {fi('job_title','Job Title','text',sv.get('job_title',''),placeholder='e.g. Sales Assistant')}
         {fi('employment_type','Employment Type',opts=[('Full-time','Full-time'),('Part-time','Part-time')],val=sv.get('employment_type','Part-time'))}
@@ -1485,7 +1510,25 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
           {'<a href="/staff/' + str(s["staff_id"]) + '/delete" class="btn-danger" onclick="return confirm(\'Are you sure?\')">🗑️ Delete</a>' if is_edit and is_owner else ''}
         </div>
       </div>
-    </form>"""
+    </form>
+    {'' if is_edit else '''
+    <script>
+    (function(){
+      var existing = ''' + _exist_json + ''';
+      var form = document.querySelector('form[action="/staff/save"]');
+      if(!form) return;
+      form.addEventListener('submit', function(e){
+        var fn=(form.first_name.value||'').trim().toLowerCase();
+        var ln=(form.last_name.value||'').trim().toLowerCase();
+        var m=existing[fn+'|'+ln];
+        if(m){
+          if(!confirm('\\u26a0\\ufe0f A staff member named '+form.first_name.value+' '+form.last_name.value+' already exists ('+m+').\\n\\nIs this a genuinely NEW starter?\\n\\nOK = add anyway     Cancel = stop')){
+            e.preventDefault();
+          }
+        }
+      });
+    })();
+    </script>'''}"""
 
     return HTMLResponse(page(title, content, user, "staff"))
 
@@ -1498,13 +1541,15 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
     form = await request.form()
     fv = lambda k, d="": str(form.get(k, d) or d).strip()
     fn = lambda k: float(form.get(k, 0) or 0) if form.get(k) else None
+    # Staff number is system-assigned: next free number in sequence, always unique.
+    next_no = (q("SELECT MAX(staff_number) m FROM staff_profiles", fetch=True)[0]["m"] or 0) + 1
     q("""INSERT INTO staff_profiles
         (staff_number,first_name,last_name,store_name,sex,phone,email,
          address_1,address_2,address_3,postcode,date_joined,date_of_birth,
          contracted_hrs,hourly_rate,is_salaried,salary_amount,is_active,
          job_title,employment_type,reports_to,notice_period)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-      (form.get("staff_number") or None, fv("first_name"), fv("last_name"),
+      (next_no, fv("first_name"), fv("last_name"),
        fv("store_name"), fv("sex"), fv("phone"), fv("email"),
        fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
        fv("date_joined") or None, fv("date_of_birth") or None,
