@@ -1958,7 +1958,8 @@ async def save_pay_change(staff_id: int, request: Request, session: str | None =
 
 
 @router.get("/staff/{staff_id}/attendance", response_class=HTMLResponse)
-def attendance_page(staff_id: int, session: str | None = Cookie(default=None)):
+def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
+                    year: str = "", view: str = "all"):
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] not in ("owner", "manager"):
@@ -1973,24 +1974,32 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None)):
         body = ("<div class='card' style='margin-top:14px;color:#64748b'>No attendance imported for "
                 f"{esc(name)} yet.</div>")
     else:
-        summ = {dict(r)["status"]: dict(r) for r in q(
-            "SELECT status, COUNT(*) days, COALESCE(SUM(hours_worked),0) hw, COALESCE(SUM(paid_hours),0) ph "
-            "FROM staff_attendance WHERE staff_id=? GROUP BY status", (staff_id,), fetch=True)}
-        def d(k): return summ.get(k, {}).get("days", 0)
-        worked = summ.get("Worked", {})
-        cards = f"""
-        <div class='grid gap-4' style='grid-template-columns:repeat(auto-fit,minmax(140px,1fr))'>
-          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Worked</div>
-            <div style='font-size:26px;font-weight:900;color:#0f2942'>{worked.get('days',0)}</div><div style='font-size:11px;color:#94a3b8'>days · {worked.get('hw',0):,.0f}h</div></div>
-          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Holiday</div>
-            <div style='font-size:26px;font-weight:900;color:#0369a1'>{d('Holiday')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
-          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Sick</div>
-            <div style='font-size:26px;font-weight:900;color:#dc2626'>{d('Sick')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
-          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Maternity</div>
-            <div style='font-size:26px;font-weight:900;color:#7c3aed'>{d('Maternity')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
-          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Bank Hol</div>
-            <div style='font-size:26px;font-weight:900;color:#475569'>{d('Bank Holiday')}</div><div style='font-size:11px;color:#94a3b8'>days</div></div>
-        </div>"""
+        from datetime import datetime as _dt
+        cur_year = str(_dt.now().year)
+        def _uk(dd):
+            p = (dd or "").split("-"); return f"{p[2]}/{p[1]}/{p[0]}" if len(p) == 3 else (dd or "")
+
+        def _summary(extra_where, extra_params):
+            return {dict(r)["status"]: dict(r) for r in q(
+                "SELECT status, COUNT(*) days, COALESCE(SUM(hours_worked),0) hw "
+                f"FROM staff_attendance WHERE staff_id=? {extra_where} GROUP BY status",
+                [staff_id] + extra_params, fetch=True)}
+        def _cards(label, sm):
+            def dd(k): return sm.get(k, {}).get("days", 0)
+            w = sm.get("Worked", {})
+            spec = [("Worked", str(w.get("days", 0)), f"days · {w.get('hw',0):,.0f}h", "#16a34a"),
+                    ("Holiday", str(dd("Holiday")), "days", "#0369a1"),
+                    ("Sick", str(dd("Sick")), "days", "#dc2626"),
+                    ("Maternity", str(dd("Maternity")), "days", "#7c3aed"),
+                    ("Bank Hol", str(dd("Bank Holiday")), "days", "#475569")]
+            inner = "".join(
+                f"<div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>{t}</div>"
+                f"<div style='font-size:24px;font-weight:900;color:{col}'>{v}</div><div style='font-size:11px;color:#94a3b8'>{sub}</div></div>"
+                for t, v, sub, col in spec)
+            return (f"<div style='font-size:12px;font-weight:800;color:#334155;margin:16px 0 6px'>{label}</div>"
+                    f"<div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(120px,1fr))'>{inner}</div>")
+        cards = (_cards(f"This year ({cur_year})", _summary("AND substr(work_date,1,4)=?", [cur_year]))
+                 + _cards("All time (from start)", _summary("", [])))
 
         yr = q("""SELECT substr(work_date,1,4) yr,
                     SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END) w,
@@ -2010,17 +2019,38 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None)):
             f"<td class='mono' style='text-align:right'>{r['mat']}</td>"
             f"<td class='mono' style='text-align:right'>{r['bh']}</td></tr>" for r in yr)
 
+        # Daily record: filter by YEAR (default current year) so the whole year is
+        # visible, not just the latest 40 — and an "absences only" toggle.
+        years = [r["yr"] for r in q("SELECT DISTINCT substr(work_date,1,4) yr FROM staff_attendance "
+                                    "WHERE staff_id=? ORDER BY yr DESC", (staff_id,), fetch=True) or []]
+        sel = year if year in years else (cur_year if cur_year in years else (years[0] if years else cur_year))
+        def _chip(y):
+            on = (y == sel)
+            st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
+            return (f"<a href='/staff/{staff_id}/attendance?year={y}&view={view}' style='{st};padding:4px 12px;"
+                    f"border-radius:999px;font-weight:700;font-size:12px;text-decoration:none'>{y}</a>")
+        chips = " ".join(_chip(y) for y in years)
+        def _vt(v, label):
+            on = (v == view)
+            st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
+            return (f"<a href='/staff/{staff_id}/attendance?year={sel}&view={v}' style='{st};padding:4px 12px;"
+                    f"border-radius:8px;font-weight:700;font-size:12px;text-decoration:none'>{label}</a>")
+        toggle = _vt("all", "All days") + " " + _vt("absences", "Absences only")
+
         _col = {"Worked":"#16a34a","Holiday":"#0369a1","Sick":"#dc2626","Maternity":"#7c3aed","Bank Holiday":"#475569"}
-        recent = q("""SELECT work_date,day,status,hours_worked,paid_hours,comments
-                      FROM staff_attendance WHERE staff_id=? ORDER BY work_date DESC LIMIT 40""",
-                   (staff_id,), fetch=True) or []
+        _bg  = {"Holiday":"#eff6ff","Sick":"#fef2f2","Maternity":"#faf5ff","Bank Holiday":"#f1f5f9"}
+        vf = "AND status!='Worked'" if view == "absences" else ""
+        det = q(f"""SELECT work_date,day,status,hours_worked,paid_hours,comments
+                    FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=? {vf}
+                    ORDER BY work_date DESC""", (staff_id, sel), fetch=True) or []
         rec_html = "".join(
-            f"<tr><td class='mono' style='font-size:12px'>{fmt_uk_date(r['work_date']) if 'fmt_uk_date' in globals() else r['work_date']}</td>"
+            f"<tr style='background:{_bg.get(r['status'],'')}'>"
+            f"<td class='mono' style='font-size:12px'>{_uk(r['work_date'])}</td>"
             f"<td style='font-size:12px'>{r['day'] or ''}</td>"
-            f"<td><span style='color:{_col.get(r['status'],'#64748b')};font-weight:700;font-size:12px'>{r['status']}</span></td>"
+            f"<td><span style='color:{_col.get(r['status'],'#64748b')};font-weight:{'800' if r['status']!='Worked' else '600'};font-size:12px'>{r['status']}</span></td>"
             f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['hours_worked']) if r['hours_worked'] is not None else '—'}</td>"
             f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['paid_hours']) if r['paid_hours'] is not None else '—'}</td>"
-            f"<td style='font-size:12px;color:#64748b'>{esc(r['comments'] or '')}</td></tr>" for r in recent)
+            f"<td style='font-size:12px;color:#64748b'>{esc(r['comments'] or '')}</td></tr>" for r in det)
 
         body = f"""
         {cards}
@@ -2034,11 +2064,16 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None)):
           </table></div>
         </div>
         <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
-          <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>Recent entries (latest 40)</div>
+          <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
+            <span>Daily record — {sel}</span><span style='display:flex;gap:6px'>{toggle}</span>
+          </div>
+          <div style='padding:10px 16px;background:#f8fafc;display:flex;gap:6px;flex-wrap:wrap;align-items:center'>
+            <span style='font-size:12px;color:#64748b;margin-right:4px'>Year:</span>{chips}
+          </div>
           <div style='overflow-x:auto'><table class='tbl'>
             <thead><tr><th>Date</th><th>Day</th><th>Status</th><th style='text-align:right'>Hours</th>
               <th style='text-align:right'>Paid</th><th>Comments</th></tr></thead>
-            <tbody>{rec_html}</tbody>
+            <tbody>{rec_html or "<tr><td colspan='6' style='text-align:center;padding:20px;color:#94a3b8'>No entries for this selection</td></tr>"}</tbody>
           </table></div>
         </div>"""
 
