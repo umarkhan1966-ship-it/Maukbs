@@ -420,6 +420,16 @@ def init_db():
         ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit
         ("vat_reclaim_pct", "vat_reclaim_pct INTEGER"),   # NULL/100 = fully reclaimable; e.g. 50 for company-car leases
     ])
+    ensure_columns("pay_history", [
+        # Track more than just hourly rate, so a salary change / promotion /
+        # hourly<->salary switch is captured in full (the original table only
+        # held hourly_rate + previous_rate).
+        ("pay_basis",       "pay_basis TEXT"),      # 'hourly' or 'salary'
+        ("salary_amount",   "salary_amount REAL"),
+        ("previous_salary", "previous_salary REAL"),
+        ("contracted_hrs",  "contracted_hrs REAL"),
+        ("previous_hrs",    "previous_hrs REAL"),
+    ])
 
     conn.commit()
     conn.close()

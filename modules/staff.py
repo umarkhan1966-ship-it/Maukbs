@@ -272,8 +272,13 @@ def ensure_staff_tables():
             pay_id        INTEGER PRIMARY KEY AUTOINCREMENT,
             staff_id      INTEGER NOT NULL,
             effective_date TEXT NOT NULL,
-            hourly_rate   REAL NOT NULL,
+            pay_basis     TEXT,
+            hourly_rate   REAL,
             previous_rate REAL,
+            salary_amount REAL,
+            previous_salary REAL,
+            contracted_hrs REAL,
+            previous_hrs  REAL,
             change_reason TEXT,
             recorded_by   TEXT,
             created_at    TEXT DEFAULT (datetime('now')),
@@ -1732,7 +1737,12 @@ def pay_history_page(staff_id: int, session: str | None = Cookie(default=None), 
     today   = datetime.now().strftime("%Y-%m-%d")
     nmw     = get_nmw_for_person(s.get("date_of_birth",""), today)
     current = s.get("hourly_rate") or 0
-    diff    = round(current - nmw, 2)
+    _is_sal = s.get("is_salaried") == 'Y'
+    _sal    = s.get("salary_amount") or 0
+    _hrs    = s.get("contracted_hrs") or 0
+    # For the NMW check a salaried person's effective hourly = salary / (hrs*52).
+    eff_hourly = (_sal / (_hrs * 52)) if (_is_sal and _hrs) else current
+    diff    = round(eff_hourly - nmw, 2)
     dob_str = s.get("date_of_birth","")
     age     = ((datetime.now() - datetime.strptime(dob_str,"%Y-%m-%d")).days // 365) if dob_str else 0
 
@@ -1753,16 +1763,26 @@ def pay_history_page(staff_id: int, session: str | None = Cookie(default=None), 
     hist_rows = ""
     for h in history:
         h = dict(h)
-        prev = f"£{h['previous_rate']:.2f}" if h.get("previous_rate") else "—"
-        change = ""
-        if h.get("previous_rate") and h.get("hourly_rate"):
-            pct = ((h["hourly_rate"] - h["previous_rate"]) / h["previous_rate"]) * 100
-            change = f"<span style='color:{'#16a34a' if pct>=0 else '#dc2626'};font-weight:700'>{'▲' if pct>=0 else '▼'} {abs(pct):.1f}%</span>"
+        _b = h.get("pay_basis") or "hourly"
+        if _b == "salary":
+            pay_now  = f"£{(h.get('salary_amount') or 0):,.0f}/yr <span style='color:#94a3b8;font-weight:400'>salary</span>"
+            if h.get("previous_salary"):   prev_txt = f"was £{h['previous_salary']:,.0f}/yr"
+            elif h.get("previous_rate"):   prev_txt = f"was £{h['previous_rate']:.2f}/hr"
+            else:                          prev_txt = ""
+        else:
+            pay_now  = f"£{(h.get('hourly_rate') or 0):.2f}/hr"
+            if h.get("previous_rate"):     prev_txt = f"was £{h['previous_rate']:.2f}/hr"
+            elif h.get("previous_salary"): prev_txt = f"was £{h['previous_salary']:,.0f}/yr salary"
+            else:                          prev_txt = ""
+        hrs_txt = "—"
+        if h.get("contracted_hrs") is not None:
+            hrs_txt = f"{h['contracted_hrs']:g}h/wk"
+            if h.get("previous_hrs") is not None and h["previous_hrs"] != h["contracted_hrs"]:
+                hrs_txt += f" <span style='color:#94a3b8'>(was {h['previous_hrs']:g})</span>"
         hist_rows += f"""<tr>
           <td class='mono'>{h['effective_date']}</td>
-          <td class='mono' style='font-weight:700'>£{h['hourly_rate']:.2f}/hr</td>
-          <td class='mono'>{prev}</td>
-          <td>{change}</td>
+          <td style='font-weight:700'>{pay_now}<div style='font-size:11px;color:#94a3b8;font-weight:400'>{prev_txt}</div></td>
+          <td class='mono' style='font-size:12px'>{hrs_txt}</td>
           <td style='font-size:12px;color:#64748b'>{h.get('change_reason') or '—'}</td>
           <td style='font-size:12px;color:#94a3b8'>{h.get('recorded_by') or '—'}</td>
         </tr>"""
@@ -1795,9 +1815,9 @@ def pay_history_page(staff_id: int, session: str | None = Cookie(default=None), 
     <!-- Current pay status -->
     <div class='grid gap-4' style='grid-template-columns:repeat(auto-fit,minmax(160px,1fr))'>
       <div class='card py-3 text-center'>
-        <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Current Rate</div>
-        <div style='font-size:28px;font-weight:900;color:#0f2942'>£{current:.2f}</div>
-        <div style='font-size:11px;color:#94a3b8'>per hour</div>
+        <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Current {'Salary' if _is_sal else 'Rate'}</div>
+        <div style='font-size:28px;font-weight:900;color:#0f2942'>{f'£{_sal:,.0f}' if _is_sal else f'£{current:.2f}'}</div>
+        <div style='font-size:11px;color:#94a3b8'>{'per year' + (f' (≈£{eff_hourly:.2f}/hr)' if _hrs else '') if _is_sal else 'per hour'}</div>
       </div>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>NMW (Age {age})</div>
@@ -1809,35 +1829,52 @@ def pay_history_page(staff_id: int, session: str | None = Cookie(default=None), 
         <div style='margin-top:8px'>{nmw_badge}</div>
       </div>
       <div class='card py-3 text-center'>
-        <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Annual Equiv.</div>
-        <div style='font-size:22px;font-weight:900;color:#0f2942'>£{(current * (s.get('contracted_hrs') or 0) * 52):,.0f}</div>
-        <div style='font-size:11px;color:#94a3b8'>based on {s.get('contracted_hrs') or 0}h/wk</div>
+        <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Annual {'Salary' if _is_sal else 'Equiv.'}</div>
+        <div style='font-size:22px;font-weight:900;color:#0f2942'>£{(_sal if _is_sal else current * _hrs * 52):,.0f}</div>
+        <div style='font-size:11px;color:#94a3b8'>{'fixed salary' if _is_sal else f'based on {_hrs}h/wk'}</div>
       </div>
     </div>
 
     <!-- Record new pay change -->
-    <div class='card' style='max-width:500px'>
+    <div class='card' style='max-width:560px'>
       <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>➕ Record Pay Change</div>
       <form action='/staff/{staff_id}/pay-history' method='POST' class='grid gap-3' style='grid-template-columns:1fr 1fr'>
         <div><label>Effective Date</label>
           <input type='date' name='effective_date' value='{today}' required></div>
-        <div><label>New Hourly Rate (£)</label>
-          <input type='number' step='0.01' name='hourly_rate' placeholder='e.g. 12.71' required></div>
+        <div><label>Pay Basis</label>
+          <select name='pay_basis' id='payBasis' onchange='payBasisToggle()'>
+            <option value='hourly'>Hourly</option>
+            <option value='salary'>Salaried</option>
+          </select></div>
+        <div id='rateBox'><label>New Hourly Rate (£)</label>
+          <input type='number' step='0.01' name='hourly_rate' placeholder='e.g. 12.71'></div>
+        <div id='salaryBox' style='display:none'><label>New Salary (£/yr)</label>
+          <input type='number' step='0.01' name='salary_amount' placeholder='e.g. 24000'></div>
+        <div><label>Contracted Hours/Week</label>
+          <input type='number' step='0.01' name='contracted_hrs' placeholder='e.g. 32.5' value='{s.get('contracted_hrs') or ''}'></div>
         <div style='grid-column:1/-1'><label>Reason</label>
-          <input type='text' name='change_reason' placeholder='e.g. Annual review, NMW increase, Promotion'></div>
+          <input type='text' name='change_reason' placeholder='e.g. Annual review, NMW increase, Promotion to Store Manager'></div>
         <div style='grid-column:1/-1'>
           <button type='submit' class='btn-primary'>💾 Save Pay Change</button>
         </div>
       </form>
     </div>
+    <script>
+    function payBasisToggle(){{
+      var b=document.getElementById('payBasis').value;
+      document.getElementById('rateBox').style.display   = (b==='salary')?'none':'';
+      document.getElementById('salaryBox').style.display = (b==='salary')?'':'none';
+    }}
+    payBasisToggle();
+    </script>
 
     <!-- Pay history -->
     <div class='card' style='padding:0;overflow:hidden'>
       <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>Pay History</div>
       <div style='overflow-x:auto'>
         <table class='tbl'>
-          <thead><tr><th>Effective Date</th><th>Rate</th><th>Previous</th><th>Change</th><th>Reason</th><th>Recorded By</th></tr></thead>
-          <tbody>{hist_rows or '<tr><td colspan="6" style="text-align:center;padding:24px;color:#94a3b8">No pay history recorded yet</td></tr>'}</tbody>
+          <thead><tr><th>Effective Date</th><th>Pay</th><th>Hours</th><th>Reason</th><th>Recorded By</th></tr></thead>
+          <tbody>{hist_rows or '<tr><td colspan="5" style="text-align:center;padding:24px;color:#94a3b8">No pay history recorded yet</td></tr>'}</tbody>
         </table>
       </div>
     </div>
@@ -1865,21 +1902,35 @@ async def save_pay_change(staff_id: int, request: Request, session: str | None =
     if user["role"] not in ("owner","manager"):
         return RedirectResponse(f"/staff/{staff_id}", status_code=303)
     form = await request.form()
-    new_rate  = float(form.get("hourly_rate", 0) or 0)
+    _num = lambda k: (float(form.get(k)) if str(form.get(k) or "").strip() not in ("", "None") else None)
+    basis     = (form.get("pay_basis") or "hourly").strip()   # 'hourly' or 'salary'
     eff_date  = form.get("effective_date","")
     reason    = str(form.get("change_reason","") or "").strip()
+    new_hrs   = _num("contracted_hrs")
+    if basis == "salary":
+        new_rate, new_salary = None, _num("salary_amount")
+    else:
+        new_rate, new_salary = _num("hourly_rate"), None
 
-    # Get previous rate
-    current = q("SELECT hourly_rate FROM staff_profiles WHERE staff_id=?",
-                (staff_id,), fetch=True)
-    prev_rate = dict(current[0])["hourly_rate"] if current else None
+    # Snapshot the CURRENT terms as the "previous" side of this change.
+    cur = dict(q("SELECT hourly_rate,salary_amount,contracted_hrs FROM staff_profiles WHERE staff_id=?",
+                 (staff_id,), fetch=True)[0])
+    prev_rate, prev_salary, prev_hrs = cur["hourly_rate"], cur["salary_amount"], cur["contracted_hrs"]
+    # If hours weren't given on the change, keep the existing contracted hours.
+    if new_hrs is None:
+        new_hrs = prev_hrs
 
-    q("""INSERT INTO pay_history (staff_id,effective_date,hourly_rate,previous_rate,change_reason,recorded_by)
-         VALUES(?,?,?,?,?,?)""",
-      (staff_id, eff_date, new_rate, prev_rate, reason or None, user.get("username")))
+    q("""INSERT INTO pay_history
+           (staff_id,effective_date,pay_basis,hourly_rate,previous_rate,
+            salary_amount,previous_salary,contracted_hrs,previous_hrs,change_reason,recorded_by)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+      (staff_id, eff_date, basis, new_rate, prev_rate,
+       new_salary, prev_salary, new_hrs, prev_hrs, reason or None, user.get("username")))
 
-    # Update current rate on profile
-    q("UPDATE staff_profiles SET hourly_rate=? WHERE staff_id=?", (new_rate, staff_id))
+    # Update the current terms on the profile to match this change.
+    q("""UPDATE staff_profiles SET is_salaried=?, hourly_rate=?, salary_amount=?, contracted_hrs=?
+         WHERE staff_id=?""",
+      ('Y' if basis == "salary" else 'N', new_rate, new_salary, new_hrs, staff_id))
 
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff/{staff_id}/pay-history?msg={uq('Pay change recorded')}", status_code=303)
