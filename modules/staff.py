@@ -396,9 +396,26 @@ def staff_page(
     # ── Staff cards ──
     cards_html = ""
     year = datetime.now().year
+    # Show a store header before each store's block when viewing both stores,
+    # so the store grouping is obvious (cards flow across a multi-column grid).
+    group_by_store = not store
+    store_counts = {}
+    for x in staff:
+        k = (dict(x).get("store_name") or "—")
+        store_counts[k] = store_counts.get(k, 0) + 1
+    last_store = None
     for s in staff:
         s = dict(s)
         sid   = s["staff_id"]
+        this_store = s.get("store_name") or "—"
+        if group_by_store and this_store != last_store:
+            cards_html += (
+                f"<div style='grid-column:1/-1;display:flex;align-items:center;gap:8px;"
+                f"margin-top:6px;padding:6px 4px;border-bottom:2px solid #cbd5e1'>"
+                f"<span style='font-size:15px'>&#128205;</span>"
+                f"<span style='font-weight:900;font-size:14px;color:#0f172a'>{esc(this_store)}</span>"
+                f"<span style='font-size:12px;color:#94a3b8;font-weight:700'>({store_counts[this_store]})</span></div>")
+            last_store = this_store
         name  = esc(f"{s['first_name']} {s['last_name']}")
         store_badge = f"<span style='background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px'>{s.get('store_name','')}</span>"
         status_badge = "<span class='badge-paid'>Active</span>" if s["is_active"] else "<span class='badge-overdue'>Left</span>"
