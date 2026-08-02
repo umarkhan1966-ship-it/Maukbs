@@ -306,6 +306,22 @@ def ensure_staff_tables():
         )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS staff_rtw_checks (
+            rtw_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_id          INTEGER NOT NULL,
+            id_type           TEXT,            -- e.g. British Passport, Driving Licence, Share code
+            rtw_confirmed     INTEGER DEFAULT 0,-- 1 = right to work verified
+            check_date        TEXT,            -- date the check was carried out
+            expiry_date       TEXT,            -- for time-limited RTW (visa/BRP); blank = no limit
+            evidence_location TEXT,            -- where the actual copy is held (e.g. offline, owner's laptop)
+            notes             TEXT,
+            checked_by        TEXT,
+            created_at        TEXT DEFAULT (datetime('now')),
+            UNIQUE(staff_id),
+            FOREIGN KEY (staff_id) REFERENCES staff_profiles(staff_id)
+        )
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS nmw_rates (
             nmw_id        INTEGER PRIMARY KEY AUTOINCREMENT,
             effective_date TEXT NOT NULL,
@@ -1032,6 +1048,7 @@ DOC_TYPES = [
     "Right to Work",
     "P45/P46",
     "New Employee Notification",
+    "Application / CV",
     "DBS Check",
     "Other",
 ]
@@ -1409,6 +1426,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         <div><span style='color:#94a3b8;font-weight:700'>Address</span><br>{esc(', '.join(filter(None,[s.get('address_1'),s.get('address_2'),s.get('address_3'),s.get('postcode')]))) or '—'}</div>
         <div><span style='color:#94a3b8;font-weight:700'>Date Joined</span><br>{s.get('date_joined') or '—'}</div>
         <div><span style='color:#94a3b8;font-weight:700'>Hourly Rate</span><br>{'£'+str(s['hourly_rate'])+'/hr' if s.get('hourly_rate') else '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Right to Work</span><br><a href='/staff/{staff_id}/documents' style='text-decoration:none'>{_rtw_status_summary(get_rtw_check(staff_id))}</a></div>
       </div>
     </div>
 
@@ -2349,6 +2367,106 @@ def _doc_action_buttons(staff_id: int, d: dict, is_owner: bool, small: bool = Fa
     return btns
 
 
+RTW_ID_TYPES = [
+    "British/Irish Passport",
+    "Passport + Visa/BRP",
+    "Biometric Residence Permit (BRP)",
+    "Driving Licence",
+    "Birth Certificate + NI proof",
+    "Online share-code check",
+    "Other",
+]
+
+
+def get_rtw_check(staff_id: int) -> dict:
+    """Current Right-to-Work / ID check record for a staff member (or {})."""
+    r = q("SELECT * FROM staff_rtw_checks WHERE staff_id=?", (staff_id,), fetch=True)
+    return dict(r[0]) if r else {}
+
+
+def _rtw_status_summary(rtw: dict) -> str:
+    """Short chip describing RTW status — reused on profile + documents page."""
+    if not rtw:
+        return "<span style='background:#fee2e2;color:#991b1b;font-weight:800;font-size:11px;padding:2px 8px;border-radius:6px'>RTW not recorded</span>"
+    if rtw.get("rtw_confirmed"):
+        base = "<span style='background:#dcfce7;color:#166534;font-weight:800;font-size:11px;padding:2px 8px;border-radius:6px'>✓ Right to work confirmed</span>"
+    else:
+        base = "<span style='background:#fef9c3;color:#854d0e;font-weight:800;font-size:11px;padding:2px 8px;border-radius:6px'>RTW recorded — not confirmed</span>"
+    exp = rtw.get("expiry_date")
+    if exp:
+        try:
+            days = (date.fromisoformat(exp) - date.today()).days
+            if days < 0:
+                base += f" <span style='color:#dc2626;font-weight:800;font-size:11px'>⚠ expired {exp}</span>"
+            elif days <= 60:
+                base += f" <span style='color:#d97706;font-weight:800;font-size:11px'>⚠ expires {exp}</span>"
+        except ValueError:
+            pass
+    return base
+
+
+def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
+    """The Right to Work / ID Check panel on the Documents page."""
+    if rtw:
+        exp = rtw.get("expiry_date")
+        exp_html = rtw.get("expiry_date") or "—"
+        if exp:
+            try:
+                days = (date.fromisoformat(exp) - date.today()).days
+                if days < 0:
+                    exp_html = f"<span style='color:#dc2626;font-weight:800'>⚠ {exp} (expired)</span>"
+                elif days <= 60:
+                    exp_html = f"<span style='color:#d97706;font-weight:800'>⚠ {exp} ({days}d left)</span>"
+            except ValueError:
+                pass
+        details = f"""
+          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;font-size:13px;margin-top:12px'>
+            <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>ID seen</span><br>{esc(rtw.get('id_type') or '—')}</div>
+            <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>Date checked</span><br>{rtw.get('check_date') or '—'}</div>
+            <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>Expiry</span><br>{exp_html}</div>
+            <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>Evidence held</span><br>{esc(rtw.get('evidence_location') or '—')}</div>
+          </div>
+          {f"<div style='font-size:12px;color:#64748b;margin-top:8px'>{esc(rtw.get('notes'))}</div>" if rtw.get('notes') else ''}
+          <div style='font-size:11px;color:#94a3b8;margin-top:6px'>Recorded by {esc(rtw.get('checked_by') or '—')}</div>"""
+    else:
+        details = "<div style='color:#94a3b8;font-size:13px;margin-top:8px'>No right-to-work / ID check recorded yet.</div>"
+
+    form_html = ""
+    if is_mgr:
+        opts = "".join(f"<option {'selected' if rtw.get('id_type') == t else ''}>{t}</option>" for t in RTW_ID_TYPES)
+        ev_default = esc(rtw.get("evidence_location") or "Held offline (owner's laptop)")
+        form_html = f"""
+        <details style='margin-top:12px'>
+          <summary style='cursor:pointer;font-weight:700;font-size:13px;color:#1e3a5f'>{'Update' if rtw else 'Record'} right-to-work / ID check</summary>
+          <form method='POST' action='/staff/{staff_id}/rtw-check' style='margin-top:10px;display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))'>
+            <label style='font-size:12px;color:#475569'>ID document seen
+              <select name='id_type' style='width:100%'>{opts}</select></label>
+            <label style='font-size:12px;color:#475569'>Date checked
+              <input type='date' name='check_date' value="{rtw.get('check_date') or ''}" style='width:100%'></label>
+            <label style='font-size:12px;color:#475569'>Expiry (if time-limited)
+              <input type='date' name='expiry_date' value="{rtw.get('expiry_date') or ''}" style='width:100%'></label>
+            <label style='font-size:12px;color:#475569'>Evidence held
+              <input type='text' name='evidence_location' value="{ev_default}" style='width:100%'></label>
+            <label style='font-size:12px;color:#475569;grid-column:1/-1'>Notes
+              <input type='text' name='notes' value="{esc(rtw.get('notes') or '')}" style='width:100%'></label>
+            <label style='font-size:13px;font-weight:700;color:#166534;display:flex;align-items:center;gap:6px'>
+              <input type='checkbox' name='rtw_confirmed' value='1' {'checked' if rtw.get('rtw_confirmed') else ''}> Right to work confirmed</label>
+            <div style='grid-column:1/-1'><button type='submit' class='btn-primary' style='padding:6px 16px;font-size:13px'>💾 Save check</button></div>
+          </form>
+          <div style='font-size:11px;color:#94a3b8;margin-top:8px'>Tip: keep the actual passport/licence copy offline (securely, backed up). This record is your audit trail that the check was done.</div>
+        </details>"""
+
+    return f"""
+    <div class='card' style='border-left:4px solid #1e3a5f'>
+      <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
+        <div style='font-weight:900;color:#0f2942;font-size:14px'>🛡️ Right to Work / ID Check</div>
+        {_rtw_status_summary(rtw)}
+      </div>
+      {details}
+      {form_html}
+    </div>"""
+
+
 @router.get("/staff/{staff_id}/documents", response_class=HTMLResponse)
 def staff_documents(
     staff_id: int,
@@ -2455,11 +2573,48 @@ def staff_documents(
       </div>
       {'<a href="/staff/document-templates" class="btn-secondary">📋 Manage Templates</a>' if user["role"] == "owner" else ''}
     </div>
+    {_rtw_panel_html(staff_id, get_rtw_check(staff_id), user["role"] in ("owner", "manager"))}
     <div style='display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(400px,1fr))'>
       {doc_cards}
     </div>"""
 
     return page(f"Documents — {name}", content, user, "staff")
+
+
+@router.post("/staff/{staff_id}/rtw-check")
+async def save_rtw_check(
+    staff_id: int,
+    request:  Request,
+    session:  str | None = Cookie(default=None)
+):
+    redir, user = require_login(session)
+    if redir: return redir
+    if (r := _require_mgr(user)): return r
+
+    form = await request.form()
+    id_type   = str(form.get("id_type", "") or "").strip()
+    confirmed = 1 if form.get("rtw_confirmed") else 0
+    check_date = str(form.get("check_date", "") or "").strip() or None
+    expiry     = str(form.get("expiry_date", "") or "").strip() or None
+    evidence   = str(form.get("evidence_location", "") or "").strip() or None
+    notes      = str(form.get("notes", "") or "").strip() or None
+
+    q("""INSERT INTO staff_rtw_checks
+            (staff_id, id_type, rtw_confirmed, check_date, expiry_date,
+             evidence_location, notes, checked_by)
+         VALUES(?,?,?,?,?,?,?,?)
+         ON CONFLICT(staff_id) DO UPDATE SET
+            id_type=excluded.id_type, rtw_confirmed=excluded.rtw_confirmed,
+            check_date=excluded.check_date, expiry_date=excluded.expiry_date,
+            evidence_location=excluded.evidence_location, notes=excluded.notes,
+            checked_by=excluded.checked_by""",
+      (staff_id, id_type, confirmed, check_date, expiry, evidence, notes,
+       user.get("username")))
+
+    from urllib.parse import quote as uq
+    return RedirectResponse(
+        f"/staff/{staff_id}/documents?msg={uq('Right-to-work / ID check saved')}",
+        status_code=303)
 
 
 @router.post("/staff/{staff_id}/documents/upload")
