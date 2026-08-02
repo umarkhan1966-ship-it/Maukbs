@@ -1299,6 +1299,12 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     plieu_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#64748b;margin-top:8px'>"
                   f"<span style='font-size:13px'>&#8505;&#65039;</span>Holiday Taken includes {_plieu} bank holiday{'s' if _plieu != 1 else ''} "
                   f"worked, kept in your balance as day{'s' if _plieu != 1 else ''} in lieu.</div>") if _plieu else ""
+    _ppb = att_leave.get("proj_balance")
+    pproj_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#94a3b8;"
+                  f"margin-top:6px;padding:6px 10px;background:#f8fafc;border-radius:8px'>"
+                  f"<span style='font-size:13px'>&#128200;</span>Projected balance at year-end: "
+                  f"<strong style='color:#475569'>{_ppb:g} hrs</strong>"
+                  f"<span>&middot; estimate at current pace, before further leave</span></div>") if _ppb is not None else ""
 
     # Leave history
     leave_hist = q("""
@@ -1391,6 +1397,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
       </div>
     </div>
     {plieu_note}
+    {pproj_note}
 
     <!-- Personal details -->
     <div class='card'>
@@ -2015,11 +2022,30 @@ def attendance_leave(staff_id: int, year=None) -> dict:
         basis = (f"12.07% of {lv['whrs']:,.0f} paid hrs"
                  + (f" · ≈ {ent/avg:.1f} days at {avg:.1f}h/day" if avg else ""))
     bal = round(ent - taken, 1)
+    # Projected year-end balance — hourly, current year only. Kept SEPARATE from the
+    # real figures above: entitlement/taken/balance are untouched. Projects the
+    # person's current weekly pace of PAID hours forward to 31 Dec, then applies
+    # 12.07% and subtracts leave already taken. A "before further leave" estimate.
+    proj = {}
+    if (not salaried) and int(year) == datetime.now().year and lv["whrs"] > 0:
+        span = q("""SELECT MIN(work_date) a, MAX(work_date) b FROM staff_attendance
+                    WHERE staff_id=? AND status='Worked' AND substr(work_date,1,4)=?""",
+                 (staff_id, year), fetch=True)
+        if span and span[0]["a"]:
+            a = datetime.fromisoformat(span[0]["a"]); b = datetime.fromisoformat(span[0]["b"])
+            span_wks = max((b - a).days / 7, 1)
+            avg_wk = lv["whrs"] / span_wks
+            rem_wks = max((datetime(int(year), 12, 31) - b).days / 7, 0)
+            proj_hrs = lv["whrs"] + avg_wk * rem_wks
+            proj_ent = round(proj_hrs * 0.1207, 1)
+            proj_bal = round(proj_ent - taken, 1)
+            proj = {"proj_balance": proj_bal, "proj_balance_fmt": f"{proj_bal:g} hrs",
+                    "proj_entitlement": proj_ent}
     return {"unit": unit, "salaried": salaried, "basis": basis,
             "entitlement": ent, "taken": taken, "balance": bal,
             "entitlement_fmt": f"{ent:g} {unit}", "taken_fmt": f"{taken:g} {unit}",
             "balance_fmt": f"{bal:g} {unit}", "bh_days": lv["bh"], "sick_days": lv["sick"],
-            "lieu": lv["lieu"]}
+            "lieu": lv["lieu"], **proj}
 
 
 @router.get("/staff/{staff_id}/attendance", response_class=HTMLResponse)
@@ -2087,6 +2113,12 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         _lieu_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#64748b;margin-top:6px'>"
                       f"<span style='font-size:13px'>&#8505;&#65039;</span>Includes {_lieu} bank holiday{'s' if _lieu != 1 else ''} worked, "
                       f"kept in balance as day{'s' if _lieu != 1 else ''} in lieu.</div>") if _lieu else ""
+        _pb = _L.get("proj_balance")
+        _proj_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#94a3b8;"
+                      f"margin-top:6px;padding:6px 10px;background:#f8fafc;border-radius:8px'>"
+                      f"<span style='font-size:13px'>&#128200;</span>Projected balance at year-end: "
+                      f"<strong style='color:#475569'>{_pb:g} hrs</strong>"
+                      f"<span>&middot; estimate at current pace, before further leave</span></div>") if _pb is not None else ""
         leave_block = f"""
         <div style='font-size:12px;font-weight:800;color:#334155;margin:18px 0 6px'>Leave — {sel}
           <span style='font-weight:400;color:#94a3b8'>· holiday + bank holidays (inclusive)</span></div>
@@ -2099,6 +2131,7 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
             <div style='font-size:24px;font-weight:900;color:{_balcol}'>{_bal:g}</div><div style='font-size:11px;color:#94a3b8'>{_unit}</div></div>
         </div>
         {_lieu_note}
+        {_proj_note}
         <div style='font-size:11px;color:#94a3b8;margin-top:3px'>Basis: {_basis}. Derived from attendance.</div>"""
 
         # Lifetime totals, one row per year.
