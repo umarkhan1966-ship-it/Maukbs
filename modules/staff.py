@@ -1978,7 +1978,8 @@ def attendance_leave(staff_id: int, year=None) -> dict:
           COALESCE(SUM(CASE WHEN status='Bank Holiday' THEN 1 ELSE 0 END),0) bh,
           COALESCE(SUM(CASE WHEN status='Sick' THEN 1 ELSE 0 END),0) sick,
           COALESCE(SUM(CASE WHEN status='Worked' THEN paid_hours ELSE 0 END),0) whrs,
-          COALESCE(SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END),0) wdays
+          COALESCE(SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END),0) wdays,
+          COALESCE(SUM(CASE WHEN status='Worked' AND a_type='B' THEN 1 ELSE 0 END),0) lieu
         FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=?""",
         (staff_id, year), fetch=True)[0])
     salaried = s.get("is_salaried") == "Y"
@@ -1995,7 +1996,8 @@ def attendance_leave(staff_id: int, year=None) -> dict:
     return {"unit": unit, "salaried": salaried, "basis": basis,
             "entitlement": ent, "taken": taken, "balance": bal,
             "entitlement_fmt": f"{ent:g} {unit}", "taken_fmt": f"{taken:g} {unit}",
-            "balance_fmt": f"{bal:g} {unit}", "bh_days": lv["bh"], "sick_days": lv["sick"]}
+            "balance_fmt": f"{bal:g} {unit}", "bh_days": lv["bh"], "sick_days": lv["sick"],
+            "lieu": lv["lieu"]}
 
 
 @router.get("/staff/{staff_id}/attendance", response_class=HTMLResponse)
@@ -2059,6 +2061,10 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         _ent, _taken, _bal = _L["entitlement"], _L["taken"], _L["balance"]
         _unit, _basis = _L["unit"], _L["basis"]
         _balcol = "#16a34a" if _bal >= 0 else "#dc2626"
+        _lieu = _L.get("lieu", 0)
+        _lieu_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#64748b;margin-top:6px'>"
+                      f"<span style='font-size:13px'>&#8505;&#65039;</span>Includes {_lieu} bank holiday{'s' if _lieu != 1 else ''} worked, "
+                      f"kept in balance as day{'s' if _lieu != 1 else ''} in lieu.</div>") if _lieu else ""
         leave_block = f"""
         <div style='font-size:12px;font-weight:800;color:#334155;margin:18px 0 6px'>Leave — {sel}
           <span style='font-weight:400;color:#94a3b8'>· holiday + bank holidays (inclusive)</span></div>
@@ -2070,6 +2076,7 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
           <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Balance</div>
             <div style='font-size:24px;font-weight:900;color:{_balcol}'>{_bal:g}</div><div style='font-size:11px;color:#94a3b8'>{_unit}</div></div>
         </div>
+        {_lieu_note}
         <div style='font-size:11px;color:#94a3b8;margin-top:3px'>Basis: {_basis}. Derived from attendance.</div>"""
 
         # Lifetime totals, one row per year.
