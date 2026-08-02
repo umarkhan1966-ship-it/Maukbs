@@ -1278,6 +1278,10 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     # Leave figure for the cards now comes from ATTENDANCE (same helper as the
     # Attendance page), so the profile and Attendance page always agree.
     att_leave = attendance_leave(staff_id, year)
+    _plieu = att_leave.get("lieu", 0)
+    plieu_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#64748b;margin-top:8px'>"
+                  f"<span style='font-size:13px'>&#8505;&#65039;</span>Holiday Taken includes {_plieu} bank holiday{'s' if _plieu != 1 else ''} "
+                  f"worked, kept in your balance as day{'s' if _plieu != 1 else ''} in lieu.</div>") if _plieu else ""
 
     # Leave history
     leave_hist = q("""
@@ -1369,6 +1373,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         <div style='font-size:11px;color:#94a3b8'>hrs/week</div>
       </div>
     </div>
+    {plieu_note}
 
     <!-- Personal details -->
     <div class='card'>
