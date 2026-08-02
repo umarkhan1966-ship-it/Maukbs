@@ -2012,6 +2012,40 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         # Summary reflects the SELECTED year.
         cards = _cards(f"Summary — {sel}", _summary("AND substr(work_date,1,4)=?", [sel]))
 
+        # Leave (holiday + bank holidays combined, entitlement is inclusive of BH),
+        # derived from the attendance for the selected year:
+        #  - salaried  -> fixed days = 5.6 weeks × days/week
+        #  - hourly    -> accrued = 12.07% of hours worked (irregular-hours method)
+        _lv = dict(q("""SELECT
+              COALESCE(SUM(CASE WHEN status IN ('Holiday','Bank Holiday') THEN 1 ELSE 0 END),0) tdays,
+              COALESCE(SUM(CASE WHEN status IN ('Holiday','Bank Holiday') THEN hours_worked ELSE 0 END),0) thrs,
+              COALESCE(SUM(CASE WHEN status='Worked' THEN hours_worked ELSE 0 END),0) whrs,
+              COALESCE(SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END),0) wdays
+            FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=?""", (staff_id, sel), fetch=True)[0])
+        if s.get("is_salaried") == "Y":
+            _dpw = s.get("days_per_week") or 5
+            _ent = round(5.6 * _dpw, 1); _taken = round(_lv["tdays"], 1); _unit = "days"
+            _basis = f"5.6 weeks × {_dpw:g} days/week (salaried)"
+        else:
+            _ent = round(_lv["whrs"] * 0.1207, 1); _taken = round(_lv["thrs"], 1); _unit = "hrs"
+            _avg = (_lv["whrs"] / _lv["wdays"]) if _lv["wdays"] else 0
+            _basis = (f"12.07% of {_lv['whrs']:,.0f} hrs worked"
+                      + (f" · ≈ {_ent/_avg:.1f} days at {_avg:.1f}h/day" if _avg else ""))
+        _bal = round(_ent - _taken, 1)
+        _balcol = "#16a34a" if _bal >= 0 else "#dc2626"
+        leave_block = f"""
+        <div style='font-size:12px;font-weight:800;color:#334155;margin:18px 0 6px'>Leave — {sel}
+          <span style='font-weight:400;color:#94a3b8'>· holiday + bank holidays (inclusive)</span></div>
+        <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Entitlement</div>
+            <div style='font-size:24px;font-weight:900;color:#0f2942'>{_ent:g}</div><div style='font-size:11px;color:#94a3b8'>{_unit}</div></div>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Taken</div>
+            <div style='font-size:24px;font-weight:900;color:#0369a1'>{_taken:g}</div><div style='font-size:11px;color:#94a3b8'>{_unit}</div></div>
+          <div class='card py-3 text-center'><div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Balance</div>
+            <div style='font-size:24px;font-weight:900;color:{_balcol}'>{_bal:g}</div><div style='font-size:11px;color:#94a3b8'>{_unit}</div></div>
+        </div>
+        <div style='font-size:11px;color:#94a3b8;margin-top:3px'>Basis: {_basis}. Derived from attendance.</div>"""
+
         # Lifetime totals, one row per year.
         yr = q("""SELECT substr(work_date,1,4) yr,
                     SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END) w,
@@ -2058,6 +2092,7 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
           <span style='font-size:13px;font-weight:800;color:#334155;margin-right:4px'>Year:</span>{chips}
         </div>
         {cards}
+        {leave_block}
         <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
           <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>By year (lifetime)</div>
           <div style='overflow-x:auto'><table class='tbl'>

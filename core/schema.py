@@ -415,6 +415,7 @@ def init_db():
         ("employment_type", "employment_type TEXT"),
         ("reports_to",      "reports_to TEXT"),
         ("notice_period",   "notice_period TEXT"),   # e.g. '1 week', '12 weeks' — per person, as Umar tracks in Excel
+        ("days_per_week",   "days_per_week REAL"),   # for SALARIED holiday entitlement (5.6 wks × days/wk)
     ])
     ensure_columns("supplier_terms", [
         ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit
