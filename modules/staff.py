@@ -1275,6 +1275,9 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
 
     year  = datetime.now().year
     leave = get_leave_summary(staff_id, year)
+    # Leave figure for the cards now comes from ATTENDANCE (same helper as the
+    # Attendance page), so the profile and Attendance page always agree.
+    att_leave = attendance_leave(staff_id, year)
 
     # Leave history
     leave_hist = q("""
@@ -1342,21 +1345,22 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     <div class='grid gap-4' style='grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Entitlement {year}</div>
-        <div style='font-size:20px;font-weight:900;color:#0f2942'>{leave.get("entitlement_fmt","—")}</div>
+        <div style='font-size:20px;font-weight:900;color:#0f2942'>{att_leave.get("entitlement_fmt","—")}</div>
         <div style='font-size:10px;color:#94a3b8'>inc. bank holidays</div>
       </div>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Holiday Taken</div>
-        <div style='font-size:20px;font-weight:900;color:#d97706'>{leave.get("taken_days",0)} days</div>
-        <div style='font-size:10px;color:#94a3b8'>{leave.get("bh_days",0)} bank hols used</div>
+        <div style='font-size:20px;font-weight:900;color:#d97706'>{att_leave.get("taken_fmt","—")}</div>
+        <div style='font-size:10px;color:#94a3b8'>{att_leave.get("bh_days",0)} bank hols incl.</div>
       </div>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Holiday Balance</div>
-        <div style='font-size:20px;font-weight:900;color:{"#16a34a" if leave.get("balance_days",0)>0 else "#dc2626"}'>{leave.get("balance_fmt","—")}</div>
+        <div style='font-size:20px;font-weight:900;color:{"#16a34a" if att_leave.get("balance",0)>=0 else "#dc2626"}'>{att_leave.get("balance_fmt","—")}</div>
+        <div style='font-size:10px;color:#94a3b8'>from attendance</div>
       </div>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Sick Days {year}</div>
-        <div style='font-size:20px;font-weight:900;color:{"#dc2626" if leave.get("sick_days",0)>0 else "#0f2942"}'>{leave.get("sick_days",0)}</div>
+        <div style='font-size:20px;font-weight:900;color:{"#dc2626" if att_leave.get("sick_days",0)>0 else "#0f2942"}'>{att_leave.get("sick_days",0)}</div>
         <div style='font-size:10px;color:#94a3b8'>does not affect holiday</div>
       </div>
       <div class='card py-3 text-center'>
@@ -1957,6 +1961,42 @@ async def save_pay_change(staff_id: int, request: Request, session: str | None =
     return RedirectResponse(f"/staff/{staff_id}/pay-history?msg={uq('Pay change recorded')}", status_code=303)
 
 
+def attendance_leave(staff_id: int, year=None) -> dict:
+    """Leave (holiday + bank holidays, inclusive) for a year, DERIVED FROM ATTENDANCE.
+    Salaried -> days (5.6 wks × days/week). Hourly -> hours (12.07% of hours worked).
+    A worked bank holiday is NOT counted (it's a worked day / day in lieu)."""
+    year = str(year or datetime.now().year)
+    rows = q("SELECT is_salaried, days_per_week, contracted_hrs FROM staff_profiles WHERE staff_id=?",
+             (staff_id,), fetch=True)
+    if not rows:
+        return {}
+    s = dict(rows[0])
+    lv = dict(q("""SELECT
+          COALESCE(SUM(CASE WHEN status IN('Holiday','Bank Holiday') THEN 1 ELSE 0 END),0) tdays,
+          COALESCE(SUM(CASE WHEN status IN('Holiday','Bank Holiday') THEN hours_worked ELSE 0 END),0) thrs,
+          COALESCE(SUM(CASE WHEN status='Bank Holiday' THEN 1 ELSE 0 END),0) bh,
+          COALESCE(SUM(CASE WHEN status='Sick' THEN 1 ELSE 0 END),0) sick,
+          COALESCE(SUM(CASE WHEN status='Worked' THEN hours_worked ELSE 0 END),0) whrs,
+          COALESCE(SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END),0) wdays
+        FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=?""",
+        (staff_id, year), fetch=True)[0])
+    salaried = s.get("is_salaried") == "Y"
+    if salaried:
+        dpw = s.get("days_per_week") or 5
+        ent = round(5.6 * dpw, 1); taken = round(lv["tdays"], 1); unit = "days"
+        basis = f"5.6 weeks × {dpw:g} days/week (salaried)"
+    else:
+        ent = round(lv["whrs"] * 0.1207, 1); taken = round(lv["thrs"], 1); unit = "hrs"
+        avg = (lv["whrs"] / lv["wdays"]) if lv["wdays"] else 0
+        basis = (f"12.07% of {lv['whrs']:,.0f} hrs worked"
+                 + (f" · ≈ {ent/avg:.1f} days at {avg:.1f}h/day" if avg else ""))
+    bal = round(ent - taken, 1)
+    return {"unit": unit, "salaried": salaried, "basis": basis,
+            "entitlement": ent, "taken": taken, "balance": bal,
+            "entitlement_fmt": f"{ent:g} {unit}", "taken_fmt": f"{taken:g} {unit}",
+            "balance_fmt": f"{bal:g} {unit}", "bh_days": lv["bh"], "sick_days": lv["sick"]}
+
+
 @router.get("/staff/{staff_id}/attendance", response_class=HTMLResponse)
 def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
                     year: str = "", view: str = "all"):
@@ -2012,26 +2052,11 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         # Summary reflects the SELECTED year.
         cards = _cards(f"Summary — {sel}", _summary("AND substr(work_date,1,4)=?", [sel]))
 
-        # Leave (holiday + bank holidays combined, entitlement is inclusive of BH),
-        # derived from the attendance for the selected year:
-        #  - salaried  -> fixed days = 5.6 weeks × days/week
-        #  - hourly    -> accrued = 12.07% of hours worked (irregular-hours method)
-        _lv = dict(q("""SELECT
-              COALESCE(SUM(CASE WHEN status IN ('Holiday','Bank Holiday') THEN 1 ELSE 0 END),0) tdays,
-              COALESCE(SUM(CASE WHEN status IN ('Holiday','Bank Holiday') THEN hours_worked ELSE 0 END),0) thrs,
-              COALESCE(SUM(CASE WHEN status='Worked' THEN hours_worked ELSE 0 END),0) whrs,
-              COALESCE(SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END),0) wdays
-            FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=?""", (staff_id, sel), fetch=True)[0])
-        if s.get("is_salaried") == "Y":
-            _dpw = s.get("days_per_week") or 5
-            _ent = round(5.6 * _dpw, 1); _taken = round(_lv["tdays"], 1); _unit = "days"
-            _basis = f"5.6 weeks × {_dpw:g} days/week (salaried)"
-        else:
-            _ent = round(_lv["whrs"] * 0.1207, 1); _taken = round(_lv["thrs"], 1); _unit = "hrs"
-            _avg = (_lv["whrs"] / _lv["wdays"]) if _lv["wdays"] else 0
-            _basis = (f"12.07% of {_lv['whrs']:,.0f} hrs worked"
-                      + (f" · ≈ {_ent/_avg:.1f} days at {_avg:.1f}h/day" if _avg else ""))
-        _bal = round(_ent - _taken, 1)
+        # Leave (holiday + bank holidays, inclusive) for the selected year — via the
+        # SAME shared helper the profile cards use, so the two can never disagree.
+        _L = attendance_leave(staff_id, sel)
+        _ent, _taken, _bal = _L["entitlement"], _L["taken"], _L["balance"]
+        _unit, _basis = _L["unit"], _L["basis"]
         _balcol = "#16a34a" if _bal >= 0 else "#dc2626"
         leave_block = f"""
         <div style='font-size:12px;font-weight:800;color:#334155;margin:18px 0 6px'>Leave — {sel}
