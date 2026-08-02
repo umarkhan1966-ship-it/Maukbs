@@ -2028,8 +2028,11 @@ def attendance_leave(staff_id: int, year=None) -> dict:
     # 12.07% and subtracts leave already taken. A "before further leave" estimate.
     proj = {}
     if (not salaried) and int(year) == datetime.now().year and lv["whrs"] > 0:
+        # Span = first to last attendance day of the year (≈ Jan 1, or their start
+        # date if they joined mid-year) — the elapsed calendar period, so the weekly
+        # pace matches the remaining calendar weeks it's projected over.
         span = q("""SELECT MIN(work_date) a, MAX(work_date) b FROM staff_attendance
-                    WHERE staff_id=? AND status='Worked' AND substr(work_date,1,4)=?""",
+                    WHERE staff_id=? AND substr(work_date,1,4)=?""",
                  (staff_id, year), fetch=True)
         if span and span[0]["a"]:
             a = datetime.fromisoformat(span[0]["a"]); b = datetime.fromisoformat(span[0]["b"])
