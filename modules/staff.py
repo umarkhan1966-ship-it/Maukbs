@@ -1971,12 +1971,13 @@ def attendance_leave(staff_id: int, year=None) -> dict:
     if not rows:
         return {}
     s = dict(rows[0])
+    # Holiday accrual AND deduction use PAID hours (breaks deducted) — Umar's basis.
     lv = dict(q("""SELECT
           COALESCE(SUM(CASE WHEN status IN('Holiday','Bank Holiday') THEN 1 ELSE 0 END),0) tdays,
-          COALESCE(SUM(CASE WHEN status IN('Holiday','Bank Holiday') THEN hours_worked ELSE 0 END),0) thrs,
+          COALESCE(SUM(CASE WHEN status IN('Holiday','Bank Holiday') THEN paid_hours ELSE 0 END),0) thrs,
           COALESCE(SUM(CASE WHEN status='Bank Holiday' THEN 1 ELSE 0 END),0) bh,
           COALESCE(SUM(CASE WHEN status='Sick' THEN 1 ELSE 0 END),0) sick,
-          COALESCE(SUM(CASE WHEN status='Worked' THEN hours_worked ELSE 0 END),0) whrs,
+          COALESCE(SUM(CASE WHEN status='Worked' THEN paid_hours ELSE 0 END),0) whrs,
           COALESCE(SUM(CASE WHEN status='Worked' THEN 1 ELSE 0 END),0) wdays
         FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=?""",
         (staff_id, year), fetch=True)[0])
@@ -1988,7 +1989,7 @@ def attendance_leave(staff_id: int, year=None) -> dict:
     else:
         ent = round(lv["whrs"] * 0.1207, 1); taken = round(lv["thrs"], 1); unit = "hrs"
         avg = (lv["whrs"] / lv["wdays"]) if lv["wdays"] else 0
-        basis = (f"12.07% of {lv['whrs']:,.0f} hrs worked"
+        basis = (f"12.07% of {lv['whrs']:,.0f} paid hrs"
                  + (f" · ≈ {ent/avg:.1f} days at {avg:.1f}h/day" if avg else ""))
     bal = round(ent - taken, 1)
     return {"unit": unit, "salaried": salaried, "basis": basis,
