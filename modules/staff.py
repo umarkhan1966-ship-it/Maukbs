@@ -436,15 +436,14 @@ def staff_page(
         store_badge = f"<span style='background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px'>{s.get('store_name','')}</span>"
         status_badge = "<span class='badge-paid'>Active</span>" if s["is_active"] else "<span class='badge-overdue'>Left</span>"
 
-        # Quick leave summary
-        leave = get_leave_summary(sid, year)
-        bal      = leave.get("balance_days", 0)
-        taken    = leave.get("taken_days", 0)
-        entit    = leave.get("entitlement_days", 0)
+        # Quick leave summary — from ATTENDANCE (same source as the profile cards),
+        # so the list and the profile always agree.
+        leave = attendance_leave(sid, year)
+        bal      = leave.get("balance", 0)
         bal_fmt  = leave.get("balance_fmt", "—")
         tak_fmt  = leave.get("taken_fmt", "—")
         ent_fmt  = leave.get("entitlement_fmt", "—")
-        bal_col  = "#16a34a" if bal > 5 else ("#d97706" if bal > 0 else "#dc2626")
+        bal_col  = "#16a34a" if bal > 5 else ("#d97706" if bal >= 0 else "#dc2626")
 
         rate = f"£{s['hourly_rate']:.2f}/hr" if s.get("hourly_rate") else "—"
         hrs  = f"{s['contracted_hrs']}h/wk" if s.get("contracted_hrs") else "—"
@@ -1331,47 +1330,47 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
                   f"<strong style='color:#475569'>{_ppb:g} hrs</strong>"
                   f"<span>&middot; estimate at current pace, before further leave</span></div>") if _ppb is not None else ""
 
-    # Leave history
+    # Leave taken this year — derived from ATTENDANCE (single source of truth), so it
+    # agrees with the summary cards. (The old leave_requests list was stale seed data.)
     leave_hist = q("""
-        SELECT * FROM leave_requests
-        WHERE staff_id=? ORDER BY date_from DESC LIMIT 20
-    """, (staff_id,), fetch=True) or []
+        SELECT work_date, status, paid_hours, comments FROM staff_attendance
+        WHERE staff_id=? AND substr(work_date,1,4)=?
+          AND status IN('Holiday','Bank Holiday','Sick','Maternity','Unpaid Leave')
+        ORDER BY work_date DESC
+    """, (staff_id, str(year)), fetch=True) or []
 
-    # Recent attendance
+    # Recent attendance — from the imported staff_attendance (not the old timesheets table).
     attendance = q("""
-        SELECT * FROM timesheets WHERE staff_name=?
-        ORDER BY work_date DESC LIMIT 10
-    """, (f"{s['first_name']} {s['last_name']}",), fetch=True) or []
+        SELECT work_date, clock_in, clock_out, status FROM staff_attendance
+        WHERE staff_id=? ORDER BY work_date DESC LIMIT 10
+    """, (staff_id,), fetch=True) or []
 
     name = esc(f"{s['first_name']} {s['last_name']}")
 
-    # ── Leave history table ──
+    # ── Leave-taken table (from attendance) ──
     leave_rows = ""
+    _lv_colour = {"Holiday": "#0369a1", "Bank Holiday": "#7c3aed", "Sick": "#dc2626",
+                  "Maternity": "#db2777", "Unpaid Leave": "#b45309"}
     for lr in leave_hist:
         lr = dict(lr)
-        at = ABSENCE_TYPES.get(lr["leave_type"], lr["leave_type"])
-        status_badge = {
-            "approved": "<span class='badge-paid'>Approved</span>",
-            "pending":  "<span class='badge-partial'>Pending</span>",
-            "declined": "<span class='badge-overdue'>Declined</span>",
-        }.get(lr["status"], lr["status"])
+        st = lr["status"]
+        badge = f"<span style='font-weight:700;color:{_lv_colour.get(st, '#334155')}'>{esc(st)}</span>"
+        hrs = f"{lr['paid_hours']:g}h" if lr.get('paid_hours') else "—"
         leave_rows += f"""
         <tr>
-          <td>{lr['date_from']}</td>
-          <td>{lr['date_to']}</td>
-          <td>{at}</td>
-          <td class='mono'>{lr['days_taken']}</td>
-          <td>{status_badge}</td>
-          <td style='font-size:12px;color:#64748b'>{lr.get('notes') or '—'}</td>
+          <td class='mono'>{lr['work_date']}</td>
+          <td>{badge}</td>
+          <td class='mono'>{hrs}</td>
+          <td style='font-size:12px;color:#64748b'>{esc(lr.get('comments') or '—')}</td>
         </tr>"""
 
-    # ── Attendance table ──
+    # ── Attendance table (from staff_attendance) ──
     att_rows = ""
     for a in attendance:
         a = dict(a)
-        ci = a.get("clock_in_time") or "—"
-        co = a.get("clock_out_time") or "⚠️ Open"
-        att_rows += f"<tr><td class='mono'>{a['work_date']}</td><td class='mono' style='color:#16a34a'>{ci}</td><td class='mono' style='color:#dc2626'>{co}</td><td><span class='badge-{'paid' if a.get('status_flag')=='GPS_VERIFIED' else 'unpaid'}'>{a.get('status_flag') or '—'}</span></td></tr>"
+        ci = a.get("clock_in") or "—"
+        co = a.get("clock_out") or "—"
+        att_rows += f"<tr><td class='mono'>{a['work_date']}</td><td class='mono' style='color:#16a34a'>{ci}</td><td class='mono' style='color:#dc2626'>{co}</td><td>{esc(a.get('status') or '—')}</td></tr>"
 
     can_edit = user["role"] in ("owner", "manager")
 
@@ -1442,13 +1441,13 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         <!-- Leave history -->
     <div class='card' style='padding:0;overflow:hidden'>
       <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px;display:flex;justify-content:space-between;align-items:center'>
-        <span>📅 Leave History {year}</span>
+        <span>📅 Leave Taken {year}</span>
         <a href='/staff/{staff_id}/request-leave' style='background:rgba(255,255,255,.15);color:white;font-size:12px;font-weight:700;padding:4px 12px;border-radius:6px;text-decoration:none'>+ Request Leave</a>
       </div>
       <div style='overflow-x:auto'>
         <table class='tbl'>
-          <thead><tr><th>From</th><th>To</th><th>Type</th><th>Days</th><th>Status</th><th>Notes</th></tr></thead>
-          <tbody>{leave_rows or '<tr><td colspan="6" style="text-align:center;padding:24px;color:#94a3b8">No leave recorded this year</td></tr>'}</tbody>
+          <thead><tr><th>Date</th><th>Type</th><th>Paid hrs</th><th>Notes</th></tr></thead>
+          <tbody>{leave_rows or '<tr><td colspan="4" style="text-align:center;padding:24px;color:#94a3b8">No leave taken this year</td></tr>'}</tbody>
         </table>
       </div>
     </div>
