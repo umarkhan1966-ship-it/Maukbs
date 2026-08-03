@@ -1049,9 +1049,17 @@ DOC_TYPES = [
     "P45/P46",
     "New Employee Notification",
     "Application / CV",
+    "Pay & Role Changes",
+    "Return-to-Work Interview",
+    "Self-Certification",
+    "Disciplinary & Warnings",
     "DBS Check",
     "Other",
 ]
+
+# Categories too sensitive for a staff member's own view — owner/manager only.
+# (Staff logins aren't live yet; this makes the app correct for when they are.)
+RESTRICTED_DOC_TYPES = {"Pay & Role Changes", "Disciplinary & Warnings"}
 
 
 def get_store_entity(store_name: str) -> dict:
@@ -2447,8 +2455,8 @@ def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
               <input type='date' name='expiry_date' value="{rtw.get('expiry_date') or ''}" style='width:100%'></label>
             <label style='font-size:12px;color:#475569'>Evidence held
               <input type='text' name='evidence_location' value="{ev_default}" style='width:100%'></label>
-            <label style='font-size:12px;color:#475569;grid-column:1/-1'>Notes
-              <input type='text' name='notes' value="{esc(rtw.get('notes') or '')}" style='width:100%'></label>
+            <label style='font-size:12px;color:#475569;grid-column:1/-1'>What was seen / notes
+              <input type='text' name='notes' value="{esc(rtw.get('notes') or '')}" placeholder="e.g. original British passport seen in person; photo + name/DOB matched" style='width:100%'></label>
             <label style='font-size:13px;font-weight:700;color:#166534;display:flex;align-items:center;gap:6px'>
               <input type='checkbox' name='rtw_confirmed' value='1' {'checked' if rtw.get('rtw_confirmed') else ''}> Right to work confirmed</label>
             <div style='grid-column:1/-1'><button type='submit' class='btn-primary' style='padding:6px 16px;font-size:13px'>💾 Save check</button></div>
@@ -2504,7 +2512,11 @@ def staff_documents(
 
     # Build document cards
     doc_cards = ""
+    viewer_is_mgr = user["role"] in ("owner", "manager")
     for dtype in DOC_TYPES:
+        # Sensitive categories never render in a staff member's own view.
+        if dtype in RESTRICTED_DOC_TYPES and not viewer_is_mgr:
+            continue
         type_docs = by_type.get(dtype, [])
         has_template = dtype in template_types
 
@@ -2817,6 +2829,8 @@ def download_doc(staff_id: int, doc_id: int, session: str | None = Cookie(defaul
              (doc_id, staff_id), fetch=True)
     if not rows: return HTMLResponse("<p>Document not found</p>", status_code=404)
     d = dict(rows[0])
+    if d["doc_type"] in RESTRICTED_DOC_TYPES and user["role"] not in ("owner", "manager"):
+        return HTMLResponse("<p>Not available</p>", status_code=403)
     if not os.path.exists(d["file_path"]):
         return HTMLResponse("<p>File not found on disk</p>", status_code=404)
     ext = os.path.splitext(d["file_path"])[1].lower()
@@ -2834,6 +2848,8 @@ def view_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=No
              (doc_id, staff_id), fetch=True)
     if not rows: return HTMLResponse("<p>Document not found</p>", status_code=404)
     d = dict(rows[0])
+    if d["doc_type"] in RESTRICTED_DOC_TYPES and user["role"] not in ("owner", "manager"):
+        return HTMLResponse("<p>Not available</p>", status_code=403)
     if not os.path.exists(d["file_path"]):
         return HTMLResponse("<p>File not found on disk</p>", status_code=404)
     # Serve with the file's REAL type: PDFs/images preview inline in the browser;
