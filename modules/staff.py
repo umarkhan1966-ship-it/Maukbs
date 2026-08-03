@@ -435,6 +435,10 @@ def staff_page(
         name  = esc(f"{s['first_name']} {s['last_name']}")
         store_badge = f"<span style='background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px'>{s.get('store_name','')}</span>"
         status_badge = "<span class='badge-paid'>Active</span>" if s["is_active"] else "<span class='badge-overdue'>Left</span>"
+        # Day-one statutory: flag active staff with no current Employment Contract on file.
+        contract_badge = ""
+        if s["is_active"] and not q("SELECT 1 FROM staff_documents WHERE staff_id=? AND doc_type='Employment Contract' AND is_current=1 LIMIT 1", (sid,), fetch=True):
+            contract_badge = "<span style='background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px'>&#9888;&#65039; No contract</span>"
 
         # Quick leave summary — from ATTENDANCE (same source as the profile cards),
         # so the list and the profile always agree.
@@ -454,7 +458,7 @@ def staff_page(
           <div style='background:#f8fafc;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #e2e8f0'>
             <div>
               <div style='font-weight:900;font-size:15px;color:#0f172a'>{name}</div>
-              <div style='display:flex;gap:6px;margin-top:4px'>{store_badge} {status_badge}</div>
+              <div style='display:flex;gap:6px;margin-top:4px;flex-wrap:wrap'>{store_badge} {status_badge} {contract_badge}</div>
             </div>
             <div style='display:flex;gap:8px'>
               <a href='/staff/{sid}' class='btn-primary' style='padding:5px 12px;font-size:12px'>👁 View</a>
