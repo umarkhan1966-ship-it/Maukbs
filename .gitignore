@@ -9,6 +9,7 @@ env/
 # Live database (back this up separately — not tracked here)
 business_vault.db
 business_vault.backup_*.db
+business_vault.db.bak-*
 *.db-journal
 *.db-wal
 
@@ -41,6 +42,7 @@ Thumbs.db
 *Logins*.txt
 *ogin*.txt
 Chat url.txt
+START THE APP*
 
 # Local chat backups, notes & scratch folders (may contain sensitive discussion — keep OFF GitHub)
 _claude_chat_backups/
