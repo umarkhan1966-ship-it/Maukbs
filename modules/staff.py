@@ -2432,7 +2432,6 @@ def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
             <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>ID seen</span><br>{esc(rtw.get('id_type') or '—')}</div>
             <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>Date checked</span><br>{rtw.get('check_date') or '—'}</div>
             <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>Expiry</span><br>{exp_html}</div>
-            <div><span style='color:#94a3b8;font-weight:700;font-size:11px;text-transform:uppercase'>Evidence held</span><br>{esc(rtw.get('evidence_location') or '—')}</div>
           </div>
           {f"<div style='font-size:12px;color:#64748b;margin-top:8px'>{esc(rtw.get('notes'))}</div>" if rtw.get('notes') else ''}
           <div style='font-size:11px;color:#94a3b8;margin-top:6px'>Recorded by {esc(rtw.get('checked_by') or '—')}</div>"""
@@ -2442,7 +2441,6 @@ def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
     form_html = ""
     if is_mgr:
         opts = "".join(f"<option {'selected' if rtw.get('id_type') == t else ''}>{t}</option>" for t in RTW_ID_TYPES)
-        ev_default = esc(rtw.get("evidence_location") or "Held offline (secure storage)")
         form_html = f"""
         <details style='margin-top:12px'>
           <summary style='cursor:pointer;font-weight:700;font-size:13px;color:#1e3a5f'>{'Update' if rtw else 'Record'} right-to-work / ID check</summary>
@@ -2453,15 +2451,12 @@ def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
               <input type='date' name='check_date' value="{rtw.get('check_date') or ''}" style='width:100%'></label>
             <label style='font-size:12px;color:#475569'>Expiry (if time-limited)
               <input type='date' name='expiry_date' value="{rtw.get('expiry_date') or ''}" style='width:100%'></label>
-            <label style='font-size:12px;color:#475569'>Evidence held
-              <input type='text' name='evidence_location' value="{ev_default}" style='width:100%'></label>
             <label style='font-size:12px;color:#475569;grid-column:1/-1'>What was seen / notes
               <input type='text' name='notes' value="{esc(rtw.get('notes') or '')}" placeholder="e.g. original British passport seen in person; photo + name/DOB matched" style='width:100%'></label>
             <label style='font-size:13px;font-weight:700;color:#166534;display:flex;align-items:center;gap:6px'>
               <input type='checkbox' name='rtw_confirmed' value='1' {'checked' if rtw.get('rtw_confirmed') else ''}> Right to work confirmed</label>
             <div style='grid-column:1/-1'><button type='submit' class='btn-primary' style='padding:6px 16px;font-size:13px'>💾 Save check</button></div>
           </form>
-          <div style='font-size:11px;color:#94a3b8;margin-top:8px'>Tip: keep the actual passport/licence copy offline (securely, backed up). This record is your audit trail that the check was done.</div>
         </details>"""
 
     return f"""
@@ -2472,6 +2467,7 @@ def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
       </div>
       {details}
       {form_html}
+      <div style='font-size:11px;color:#94a3b8;margin-top:10px'>🔒 Photo-ID originals are kept offline — this panel is the record that the check was done.</div>
     </div>"""
 
 
