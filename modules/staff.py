@@ -2442,7 +2442,7 @@ def _rtw_panel_html(staff_id: int, rtw: dict, is_mgr: bool) -> str:
     form_html = ""
     if is_mgr:
         opts = "".join(f"<option {'selected' if rtw.get('id_type') == t else ''}>{t}</option>" for t in RTW_ID_TYPES)
-        ev_default = esc(rtw.get("evidence_location") or "Held offline (owner's laptop)")
+        ev_default = esc(rtw.get("evidence_location") or "Held offline (secure storage)")
         form_html = f"""
         <details style='margin-top:12px'>
           <summary style='cursor:pointer;font-weight:700;font-size:13px;color:#1e3a5f'>{'Update' if rtw else 'Record'} right-to-work / ID check</summary>
@@ -2529,11 +2529,11 @@ def staff_documents(
             gen_badge = "<span style='background:#dbeafe;color:#1d4ed8;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px'>AUTO-GENERATED</span>" if current["generated"] else ""
             current_html = f"""
             <div style='background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
-              <div>
+              <div style='min-width:0'>
                 <div style='font-size:13px;font-weight:700;color:#166534'>
-                  ✅ v{current['version']} — {current['uploaded_at'][:10]} {_kind_chip(current['file_path'])} {gen_badge}
+                  ✅ {esc(current.get('file_name') or 'Document')} {_kind_chip(current['file_path'])} {gen_badge}
                 </div>
-                <div style='font-size:11px;color:#64748b'>{current.get('notes') or ''}</div>
+                <div style='font-size:11px;color:#64748b'>v{current['version']} · added {current['uploaded_at'][:10]}{(' · ' + esc(current['notes'])) if current.get('notes') else ''}</div>
               </div>
               <div style='display:flex;gap:6px;flex-wrap:wrap'>
                 {_doc_action_buttons(staff_id, current, is_owner)}
@@ -2546,7 +2546,7 @@ def staff_documents(
             for od in older:
                 older_html += f"""
                 <div style='display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:12px;color:#64748b;border-bottom:1px solid #f1f5f9;gap:8px;flex-wrap:wrap'>
-                  <span>v{od['version']} — {od['uploaded_at'][:10]} {_kind_chip(od['file_path'])}</span>
+                  <span style='min-width:0'>{esc(od.get('file_name') or 'Document')} <span style='color:#94a3b8'>· v{od['version']} · {od['uploaded_at'][:10]}</span> {_kind_chip(od['file_path'])}</span>
                   <span style='display:flex;gap:6px;flex-wrap:wrap'>{_doc_action_buttons(staff_id, od, is_owner, small=True)}</span>
                 </div>"""
             older_html += "</div>"
