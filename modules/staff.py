@@ -1339,11 +1339,6 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         ORDER BY work_date DESC
     """, (staff_id, str(year)), fetch=True) or []
 
-    # Recent attendance — from the imported staff_attendance (not the old timesheets table).
-    attendance = q("""
-        SELECT work_date, clock_in, clock_out, status FROM staff_attendance
-        WHERE staff_id=? ORDER BY work_date DESC LIMIT 10
-    """, (staff_id,), fetch=True) or []
 
     name = esc(f"{s['first_name']} {s['last_name']}")
 
@@ -1363,14 +1358,6 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
           <td class='mono'>{hrs}</td>
           <td style='font-size:12px;color:#64748b'>{esc(lr.get('comments') or '—')}</td>
         </tr>"""
-
-    # ── Attendance table (from staff_attendance) ──
-    att_rows = ""
-    for a in attendance:
-        a = dict(a)
-        ci = a.get("clock_in") or "—"
-        co = a.get("clock_out") or "—"
-        att_rows += f"<tr><td class='mono'>{a['work_date']}</td><td class='mono' style='color:#16a34a'>{ci}</td><td class='mono' style='color:#dc2626'>{co}</td><td>{esc(a.get('status') or '—')}</td></tr>"
 
     can_edit = user["role"] in ("owner", "manager")
 
@@ -1452,15 +1439,8 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
       </div>
     </div>
 
-    <!-- Attendance -->
-    <div class='card' style='padding:0;overflow:hidden'>
-      <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>⏱ Recent Attendance</div>
-      <div style='overflow-x:auto'>
-        <table class='tbl'>
-          <thead><tr><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Status</th></tr></thead>
-          <tbody>{att_rows or '<tr><td colspan="4" style="text-align:center;padding:24px;color:#94a3b8">No attendance records</td></tr>'}</tbody>
-        </table>
-      </div>
+    <div style='text-align:right;margin-top:4px'>
+      {'<a href="/staff/' + str(staff_id) + '/attendance" style="font-size:12px;color:#64748b">Full attendance record →</a>' if can_edit else ''}
     </div>"""
 
     return page(name, content, user, "staff")
