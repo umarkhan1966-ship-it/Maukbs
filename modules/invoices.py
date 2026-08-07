@@ -583,6 +583,11 @@ def invoices_page(
     cancel_url  = f"/invoices?ledger={ledger}"
     # Staff can't edit the auto-calculated fields (VAT, Net, Due, Terms); owner/manager can.
     lock_calc   = (user.get("role") == "staff")
+    # A non-owner viewing an invoice ALREADY on file gets a fully read-only form —
+    # they can see everything but change nothing (only the owner can edit it).
+    readonly_all = is_edit and user.get("role") != "owner"
+    ro_js = ("<script>document.querySelectorAll('#invoiceForm input,#invoiceForm select,#invoiceForm textarea')"
+             ".forEach(e=>{e.disabled=true;e.style.background='#f1f5f9';e.style.color='#64748b';});</script>") if readonly_all else ""
     # Supplier -> term rule map for auto-filling the due date on the form.
     import json
     _terms_rows = q("SELECT supplier_name, term_type, term_value FROM supplier_terms WHERE term_type IS NOT NULL",
@@ -911,6 +916,7 @@ def invoices_page(
           <a href='{cancel_url}' class='btn-secondary'>Cancel</a>
           {"<label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;margin-left:8px'><input type='checkbox' name='save_pending' value='1' " + ('checked' if inv.get('approval_status')=='pending' else '') + "> Mark as pending (review later)</label>" if user.get('role') in ('owner','manager') else ''}
         </div>
+      {ro_js}
       </form>
     </div>"""
 
