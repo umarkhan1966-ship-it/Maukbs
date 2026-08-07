@@ -1109,6 +1109,15 @@ def get_merge_fields(staff: dict) -> dict:
     Supports both <<field>> (your existing format) and {{FIELD}} formats.
     """
     today    = datetime.now().strftime("%d %B %Y")
+
+    def _fmt(d):   # ISO date -> "11 September 2023" for generated documents
+        if not d:
+            return ''
+        try:
+            return datetime.strptime(str(d)[:10], "%Y-%m-%d").strftime("%d %B %Y")
+        except Exception:
+            return str(d)
+
     name     = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip()
     store    = staff.get('store_name','')
     ent      = get_store_entity(store)
@@ -1162,9 +1171,9 @@ def get_merge_fields(staff: dict) -> dict:
         "<<contracted hours>>":        f"{hrs_txt} hours per week",
         "<<hours of work>>":           f"{hrs_txt} hours per week",   # contract template token
         "<<hourly rate>>":             f"£{rate:.2f}",
-        "<<date of joining>>":         staff.get('date_joined','') or '',
-        "<<DOJ>>":                     staff.get('date_joined','') or '',   # contract template token
-        "<<date of birth>>":           staff.get('date_of_birth','') or '',
+        "<<date of joining>>":         _fmt(staff.get('date_joined')),
+        "<<DOJ>>":                     _fmt(staff.get('date_joined')),   # contract template token
+        "<<date of birth>>":           _fmt(staff.get('date_of_birth')),
         "<<p osition>>":               job_title,
         "<<e mployer>>":               employer,
     }
@@ -1183,8 +1192,8 @@ def get_merge_fields(staff: dict) -> dict:
         "{{PHONE}}":            staff.get('phone','') or '',
         "{{STORE}}":            store,
         "{{STORE_ADDRESS}}":    store_addr,
-        "{{DATE_JOINED}}":      staff.get('date_joined','') or '',
-        "{{DATE_OF_BIRTH}}":    staff.get('date_of_birth','') or '',
+        "{{DATE_JOINED}}":      _fmt(staff.get('date_joined')),
+        "{{DATE_OF_BIRTH}}":    _fmt(staff.get('date_of_birth')),
         "{{CONTRACTED_HOURS}}": str(hrs),
         "{{HOURLY_RATE}}":      f"£{rate:.2f}" if rate else '',
         "{{JOB_TITLE}}":        job_title,
