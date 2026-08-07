@@ -8,7 +8,7 @@ from fastapi.responses import (HTMLResponse, RedirectResponse, FileResponse,
 from core.db import DB_FILE, db, q
 from core.constants import *
 from core.security import (hash_password, verify_password,
-                           get_session, require_login)
+                           get_session, require_login, user_staff_id)
 from core.layout import page
 from core.rota_utils import (calc_paid_hours, parse_hours,
                              get_week_start, get_week_dates)
@@ -34,10 +34,9 @@ def _require_mgr(user):
 
 
 def _own_staff_id(user):
-    """staff_id of the logged-in user's own profile (matched on full name), or None."""
-    rows = q("SELECT staff_id FROM staff_profiles WHERE first_name||' '||last_name=? AND is_active=1",
-             (user.get("full_name", ""),), fetch=True)
-    return rows[0]["staff_id"] if rows else None
+    """staff_id of the logged-in user's own profile — via the robust users.staff_id
+    link (falls back to full-name match for any unlinked legacy account), or None."""
+    return user_staff_id(user)
 
 
 def _staff_access_guard(user, staff_id):
@@ -1321,9 +1320,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
 
     # Access control — staff can only see their own profile
     if user["role"] == "staff":
-        my_rows = q("SELECT staff_id FROM staff_profiles WHERE first_name||' '||last_name=?",
-                    (user.get("full_name",""),), fetch=True)
-        my_id = my_rows[0]["staff_id"] if my_rows else None
+        my_id = _own_staff_id(user)
         if my_id != staff_id:
             return RedirectResponse(f"/staff/{my_id}" if my_id else "/", status_code=303)
 
@@ -1474,9 +1471,7 @@ def edit_staff_form(staff_id: int, session: str | None = Cookie(default=None)):
     s = dict(rows[0])
     # Staff can only edit their own profile (limited fields)
     if user["role"] == "staff":
-        my_rows = q("SELECT staff_id FROM staff_profiles WHERE first_name||' '||last_name=?",
-                    (user.get("full_name",""),), fetch=True)
-        my_id = my_rows[0]["staff_id"] if my_rows else None
+        my_id = _own_staff_id(user)
         if my_id != staff_id:
             return RedirectResponse("/", status_code=303)
     return render_staff_form(user, s)

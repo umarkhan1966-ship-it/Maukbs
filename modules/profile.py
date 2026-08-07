@@ -8,7 +8,7 @@ from fastapi.responses import (HTMLResponse, RedirectResponse, FileResponse,
 from core.db import DB_FILE, db, q
 from core.constants import *
 from core.security import (hash_password, verify_password,
-                           get_session, require_login)
+                           get_session, require_login, user_staff_id)
 from core.layout import page
 from core.rota_utils import (calc_paid_hours, parse_hours,
                              get_week_start, get_week_dates)
@@ -43,11 +43,11 @@ def my_profile(session: str | None = Cookie(default=None), msg: str = "", msg_ty
       </form>
     </div>"""
 
-    # Find staff profile by matching full name to username
-    full_name = user.get("full_name", "")
-    rows = q("""SELECT * FROM staff_profiles
-                WHERE first_name || ' ' || last_name = ?
-                AND is_active = 1""", (full_name,), fetch=True)
+    # Find the staff profile linked to this login — via the robust users.staff_id
+    # link (falls back to a full-name match for any unlinked legacy account).
+    sid_link = user_staff_id(user)
+    rows = q("SELECT * FROM staff_profiles WHERE staff_id = ? AND is_active = 1",
+             (sid_link,), fetch=True) if sid_link else []
 
     if not rows:
         content = f"""

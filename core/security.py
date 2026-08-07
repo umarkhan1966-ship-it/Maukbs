@@ -54,3 +54,18 @@ def require_login(token: str | None):
     if not user:
         return RedirectResponse("/login", status_code=303), None
     return None, user
+
+
+def user_staff_id(user: dict | None) -> int | None:
+    """The staff_profiles.staff_id this login belongs to. Prefers the robust
+    users.staff_id link; falls back to a full-name match for any legacy account
+    not yet linked. Returns None for owner/manager accounts with no staff record."""
+    if not user:
+        return None
+    sid = user.get("staff_id")
+    if sid:
+        return sid
+    rows = q("""SELECT staff_id FROM staff_profiles
+                WHERE first_name || ' ' || last_name = ? AND is_active = 1""",
+             (user.get("full_name", ""),), fetch=True)
+    return rows[0]["staff_id"] if rows else None

@@ -422,6 +422,12 @@ def init_db():
         ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit
         ("vat_reclaim_pct", "vat_reclaim_pct INTEGER"),   # NULL/100 = fully reclaimable; e.g. 50 for company-car leases
     ])
+    ensure_columns("users", [
+        # Robust login->staff link (replaces the fragile full-name match). Set when
+        # an owner creates a staff login; NULL for owner/manager role accounts.
+        ("staff_id",      "staff_id INTEGER"),
+        ("must_change_pw","must_change_pw INTEGER DEFAULT 0"),   # force password change on first login
+    ])
     ensure_columns("pay_history", [
         # Track more than just hourly rate, so a salary change / promotion /
         # hourly<->salary switch is captured in full (the original table only
