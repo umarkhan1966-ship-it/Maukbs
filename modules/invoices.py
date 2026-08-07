@@ -2229,10 +2229,10 @@ def recent_payments(session: str | None = Cookie(default=None), scope: str = "")
       <div class='text-2xl font-black text-slate-800'>📋 Recent Payments</div>
       <a href='/invoices' class='btn-secondary'>← Back to Invoices</a>
     </div>
-    <form method='GET' action='/invoices/recent-payments' class='card flex gap-3 items-end' style='margin-bottom:12px'>
+    {(f'''<form method='GET' action='/invoices/recent-payments' class='card flex gap-3 items-end' style='margin-bottom:12px'>
       <div><label>Show</label><select name='scope' onchange='this.form.submit()'>{scope_opts}</select></div>
       <button type='submit' class='btn-secondary'>🔍 Filter</button>
-    </form>
+    </form>''') if user.get("role") == "owner" else (f'''<div class='card' style='margin-bottom:12px;padding:10px 16px;font-size:13px;color:#64748b'>Showing payments for <strong style='color:#0f2942'>{scope}</strong></div>''')}
     <div class='card' style='padding:0;overflow:hidden'>
       <div style='overflow-x:auto'>
         <table class='tbl'>
