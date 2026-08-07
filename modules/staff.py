@@ -2321,13 +2321,16 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         # Year selector — drives BOTH the summary and the daily list below.
         years = [r["yr"] for r in q("SELECT DISTINCT substr(work_date,1,4) yr FROM staff_attendance "
                                     "WHERE staff_id=? ORDER BY yr DESC", (staff_id,), fetch=True) or []]
-        sel = year if year in years else (cur_year if cur_year in years else (years[0] if years else cur_year))
+        if is_owner:
+            sel = year if year in years else (cur_year if cur_year in years else (years[0] if years else cur_year))
+        else:
+            sel = cur_year   # managers are locked to the current year — no history
         def _chip(y):
             on = (y == sel)
             st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
             return (f"<a href='/staff/{staff_id}/attendance?year={y}&view={view}' style='{st};padding:5px 14px;"
                     f"border-radius:999px;font-weight:700;font-size:13px;text-decoration:none'>{y}</a>")
-        chips = " ".join(_chip(y) for y in years)
+        chips = " ".join(_chip(y) for y in years) if is_owner else ""
 
         # Summary reflects the SELECTED year.
         cards = _cards(f"Summary — {sel}", _summary("AND substr(work_date,1,4)=?", [sel]))
@@ -2430,10 +2433,13 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         </div>""" if is_owner else ""
 
         _daily_title = f"Daily record — {sel}" if is_owner else f"Absences — {sel}"
-        body = f"""
+        # Owner gets the year selector; managers are locked to the current year.
+        year_bar = (f"""
         <div class='card' style='margin-top:14px;padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>
           <span style='font-size:13px;font-weight:800;color:#334155;margin-right:4px'>Year:</span>{chips}
-        </div>
+        </div>""" if is_owner else "")
+        body = f"""
+        {year_bar}
         {cards}
         {leave_block}
         {lifetime_block}
