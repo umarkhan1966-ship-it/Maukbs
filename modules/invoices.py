@@ -1347,14 +1347,22 @@ def invoices_page(
           </a>
         </div>"""
 
-    # ── Ledger switcher ──
+    # ── Ledger switcher ── owner has several ledgers to switch between; a
+    # single-store user (manager) has just one, so show a plain label, not a
+    # one-option dropdown.
+    if len(ledgers) > 1:
+        ledger_control = f"""<select onchange="window.location='/invoices?ledger='+this.value"
+        style='border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;font-weight:600;max-width:260px'>
+        {ledger_opts}
+      </select>"""
+    else:
+        _only = ledgers[0][1] if ledgers else ledger
+        ledger_control = (f"<span style='border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;"
+                          f"font-size:14px;font-weight:600;color:#0f2942;background:#f8fafc'>{_only}</span>")
     ledger_switcher = f"""
     <div class='flex flex-wrap gap-2 items-center'>
       <div class='text-xl font-black text-slate-800'>🧾 Invoice Manager</div>
-      <select onchange="window.location='/invoices?ledger='+this.value"
-        style='border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;font-weight:600;max-width:260px'>
-        {ledger_opts}
-      </select>
+      {ledger_control}
     </div>
     <div class='flex flex-wrap gap-2 items-center justify-end' style='margin-top:8px'>
       <a href='/invoices/recent-payments' class='btn-secondary'>📋 Recent Payments</a>
