@@ -12,7 +12,7 @@ from core.security import (hash_password, verify_password,
 from core.layout import page
 from core.rota_utils import (calc_paid_hours, parse_hours,
                              get_week_start, get_week_dates)
-from modules.staff import get_leave_summary
+from modules.staff import attendance_leave
 
 router = APIRouter()
 
@@ -63,7 +63,7 @@ def my_profile(session: str | None = Cookie(default=None), msg: str = "", msg_ty
     s     = dict(rows[0])
     sid   = s["staff_id"]
     year  = datetime.now().year
-    leave = get_leave_summary(sid, year)
+    leave = attendance_leave(sid, year)   # single source of truth = imported attendance
 
     content = f"""
     {flash}
@@ -77,7 +77,7 @@ def my_profile(session: str | None = Cookie(default=None), msg: str = "", msg_ty
       </div>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Holiday Taken</div>
-        <div style='font-size:24px;font-weight:900;color:#d97706'>{leave.get("taken_days",0)} days</div>
+        <div style='font-size:24px;font-weight:900;color:#d97706'>{leave.get("taken_fmt","—")}</div>
       </div>
       <div class='card py-3 text-center'>
         <div style='font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase'>Balance</div>

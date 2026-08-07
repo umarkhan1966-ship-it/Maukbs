@@ -1332,8 +1332,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         return RedirectResponse("/staff", status_code=303)
 
     year  = datetime.now().year
-    leave = get_leave_summary(staff_id, year)
-    # Leave figure for the cards now comes from ATTENDANCE (same helper as the
+    # Leave figure for the cards comes from ATTENDANCE (same helper as the
     # Attendance page), so the profile and Attendance page always agree.
     att_leave = attendance_leave(staff_id, year)
     _plieu = att_leave.get("lieu", 0)
@@ -1702,8 +1701,8 @@ def request_leave_form(staff_id: int, session: str | None = Cookie(default=None)
     if not rows: return RedirectResponse("/staff", status_code=303)
     s    = dict(rows[0])
     name = f"{s['first_name']} {s['last_name']}"
-    leave = get_leave_summary(staff_id)
-    bal   = leave.get("balance_days", 0)
+    leave = attendance_leave(staff_id)   # single source of truth = imported attendance
+    bal   = leave.get("balance", 0)
 
     type_opts = "".join(f"<option value='{k}'>{v}</option>" for k,v in ABSENCE_TYPES.items())
 
