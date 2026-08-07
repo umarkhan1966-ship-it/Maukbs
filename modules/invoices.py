@@ -331,8 +331,8 @@ EXPENSE_TYPES   = [
 
 def ledger_options(user: dict) -> list[tuple]:
     """Return (value, label) pairs for store/ledger selector.
-    Staff see only their store. Managers see both stores.
-    Owner sees both stores + all properties."""
+    Staff AND managers see only their own store. Owner sees both stores +
+    all properties + the company ledger."""
     opts = []
     role  = user.get("role", "staff")
     store = user.get("store_name", "")
@@ -347,14 +347,17 @@ def ledger_options(user: dict) -> list[tuple]:
         # rental property), so it's added here rather than in the properties
         # table — keeps it out of rental/mortgage reports. Name from the entities table.
         opts.append(("PROP:MREL", f"🏢 {entity_name('MREL', 'MAUKBs Real Estate Ltd')} (Company)"))
-    elif role == "manager":
-        opts += [("Uxbridge", "🏪 Uxbridge (Retail)"),
-                 ("Newbury",  "🏪 Newbury (Retail)")]
     else:
-        # Store staff — only their assigned store
+        # Store staff + managers — only their own assigned store, no properties.
         s = store or "Uxbridge"
         opts += [(s, f"🏪 {s} (Retail)")]
     return opts
+
+
+def _ledger_allowed(user, ledger: str) -> bool:
+    """True only if this user may view/act on the given store/property ledger —
+    the server-side guard behind the dropdown (a URL can't sneak past it)."""
+    return ledger in {v for v, _ in ledger_options(user)}
 
 
 def is_property_ledger(store_val: str) -> bool:
@@ -465,6 +468,11 @@ def invoices_page(
     # ledger this browser viewed (remembered in a cookie), then Uxbridge.
     if not ledger:
         ledger = last_ledger or "Uxbridge"
+    # Scope guard: a manager/staff can never open a store or property they're not
+    # assigned to, even by editing the URL — snap them back to an allowed ledger.
+    if not _ledger_allowed(user, ledger):
+        _allowed = [v for v, _ in ledger_options(user)]
+        ledger = _allowed[0] if _allowed else "Uxbridge"
     response.set_cookie("last_ledger", ledger, max_age=60 * 60 * 24 * 30, samesite="lax")
 
     today      = datetime.now().strftime("%Y-%m-%d")
@@ -898,7 +906,7 @@ def invoices_page(
           {payment_fields}
         </div>
         <div class='flex gap-3 mt-4 items-center'>
-          <button type='submit' class='btn-primary'>{'💾 Update Invoice' if is_edit else '➕ Save Invoice'}</button>
+          {("<button type='submit' class='btn-primary'>" + ('💾 Update Invoice' if is_edit else '➕ Save Invoice') + "</button>") if (not is_edit or user.get('role') == 'owner') else "<span style='font-size:13px;color:#b45309;font-weight:700'>🔒 This invoice is already entered — only the owner can change it.</span>"}
           {'<a href="/invoices/delete/' + str(edit_id) + '?ledger=' + ledger + '" class="btn-danger" onclick=\"return confirm(\'Delete this invoice?\');\">🗑️ Delete</a>' if (is_edit and user.get('role') == 'owner') else ''}
           <a href='{cancel_url}' class='btn-secondary'>Cancel</a>
           {"<label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;margin-left:8px'><input type='checkbox' name='save_pending' value='1' " + ('checked' if inv.get('approval_status')=='pending' else '') + "> Mark as pending (review later)</label>" if user.get('role') in ('owner','manager') else ''}
@@ -1592,6 +1600,16 @@ async def save_invoice(
     loc_col = "property_name"     if is_prop else "store_name"
     loc_val = prop_name(ledger)   if is_prop else ledger
 
+    # Access: a manager/staff can only save within their own store, and can NEVER
+    # change an invoice that is already on file — only the owner can (Umar's rule).
+    if not _ledger_allowed(user, ledger):
+        return RedirectResponse("/invoices?msg=That+area+is+not+yours&msg_type=error", status_code=303)
+    if invoice_id and user.get("role") != "owner":
+        return RedirectResponse(
+            f"/invoices?ledger={urlquote(ledger)}&edit_id={invoice_id}"
+            f"&msg={urlquote('Only the owner can change an invoice once it has been entered')}&msg_type=error",
+            status_code=303)
+
     def fv(key, default=""):
         v = form.get(key, default)
         return v.strip() if isinstance(v, str) else v
@@ -2131,6 +2149,11 @@ def recent_payments(session: str | None = Cookie(default=None), scope: str = "")
 
     from collections import defaultdict
 
+    # Managers/staff are locked to their OWN store's payments — no other store and
+    # no property, regardless of any ?scope= they try in the URL.
+    if user.get("role") != "owner":
+        scope = user.get("store_name") or "Uxbridge"
+
     # Scope lets you focus on one ledger — useful because property payments can
     # be much older than the busy store ones and would otherwise drop off the
     # most-recent list.
@@ -2157,10 +2180,12 @@ def recent_payments(session: str | None = Cookie(default=None), scope: str = "")
     rows = q(" UNION ALL ".join(parts) + " ORDER BY paid_date DESC LIMIT 300",
              params, fetch=True) or []
 
+    _scope_choices = ([("", "Everything"), ("Uxbridge", "Uxbridge"),
+                       ("Newbury", "Newbury"), ("Property", "Properties")]
+                      if user.get("role") == "owner" else [(scope, scope)])
     scope_opts = "".join(
         f"<option value='{v}' {'selected' if scope==v else ''}>{lbl}</option>"
-        for v, lbl in [("", "Everything"), ("Uxbridge", "Uxbridge"),
-                       ("Newbury", "Newbury"), ("Property", "Properties")])
+        for v, lbl in _scope_choices)
 
     by_date = defaultdict(list)
     for r in rows:
