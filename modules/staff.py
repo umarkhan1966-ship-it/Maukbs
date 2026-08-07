@@ -1096,6 +1096,14 @@ DOC_TYPES = [
 # (Staff logins aren't live yet; this makes the app correct for when they are.)
 RESTRICTED_DOC_TYPES = {"Pay & Role Changes", "Disciplinary & Warnings"}
 
+# Managers may CAPTURE (upload) only these — the sick-return + onboarding forms
+# they complete WITH the staff member. They can never open/download any document
+# (that's owner-only); after upload they just see a "✓ on file" tick.
+MANAGER_CAPTURE_DOC_TYPES = {
+    "Return-to-Work Interview", "Self-Certification",
+    "Application / CV", "Right to Work", "New Employee Notification", "P45/P46",
+}
+
 
 def get_store_entity(store_name: str) -> dict:
     """The legal entity a store trades as, read from the company_entities table
@@ -2599,9 +2607,26 @@ def staff_documents(
     doc_cards = ""
     viewer_is_mgr = user["role"] in ("owner", "manager")
     for dtype in DOC_TYPES:
-        # Sensitive categories never render in a staff member's own view.
-        if dtype in RESTRICTED_DOC_TYPES and not viewer_is_mgr:
+        # MANAGER: capture-only — only the allowed types, and NO view/download, no
+        # versions, no auto-fill; just an upload box + a "✓ on file" tick.
+        if not is_owner:
+            if dtype not in MANAGER_CAPTURE_DOC_TYPES:
+                continue
+            _cur = next((d for d in by_type.get(dtype, []) if d["is_current"]), None)
+            _tick = ("<span style='color:#16a34a;font-weight:700;font-size:13px'>&#10003; on file</span>"
+                     if _cur else "<span style='color:#94a3b8;font-size:13px'>&mdash; not captured yet</span>")
+            doc_cards += f"""
+        <div class='card'>
+          <div style='font-weight:900;color:#0f2942;margin-bottom:6px;font-size:14px'>{dtype}</div>
+          <div style='margin-bottom:8px'>{_tick}</div>
+          <form action='/staff/{staff_id}/documents/upload' method='POST' enctype='multipart/form-data' style='display:flex;gap:6px'>
+            <input type='hidden' name='doc_type' value='{dtype}'>
+            <input type='file' name='doc_file' accept='.pdf,.doc,.docx' style='flex:1;font-size:12px;padding:4px 8px'>
+            <button type='submit' class='btn-primary' style='padding:4px 12px;font-size:11px;white-space:nowrap'>&#8593;&#65039; Upload</button>
+          </form>
+        </div>"""
             continue
+        # ---- OWNER: full document card (view/download, versions, auto-fill) ----
         type_docs = by_type.get(dtype, [])
         has_template = dtype in template_types
 
@@ -2670,7 +2695,7 @@ def staff_documents(
       </div>
       {'<a href="/staff/document-templates" class="btn-secondary">📋 Manage Templates</a>' if user["role"] == "owner" else ''}
     </div>
-    {_rtw_panel_html(staff_id, get_rtw_check(staff_id), user["role"] in ("owner", "manager"))}
+    {_rtw_panel_html(staff_id, get_rtw_check(staff_id), True) if is_owner else ''}
     <div style='display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(400px,1fr))'>
       {doc_cards}
     </div>"""
@@ -2726,6 +2751,12 @@ async def upload_staff_doc(
 
     form     = await request.form()
     doc_type = form.get("doc_type","Other")
+    # Managers may only CAPTURE the allowed onboarding/absence types.
+    if user["role"] != "owner" and doc_type not in MANAGER_CAPTURE_DOC_TYPES:
+        from urllib.parse import quote as uq
+        return RedirectResponse(
+            f"/staff/{staff_id}/documents?msg={uq('You can only add sick-return and onboarding documents')}&msg_type=error",
+            status_code=303)
     doc_file = form.get("doc_file")
     notes    = str(form.get("notes","") or "").strip()
 
@@ -2853,7 +2884,7 @@ async def generate_doc(
 ):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _require_mgr(user)): return r
+    if (r := _require_owner(user)): return r   # auto-fill templates are owner-only
 
     form     = await request.form()
     doc_type = form.get("doc_type","")
@@ -2914,7 +2945,7 @@ def download_doc(staff_id: int, doc_id: int, session: str | None = Cookie(defaul
              (doc_id, staff_id), fetch=True)
     if not rows: return HTMLResponse("<p>Document not found</p>", status_code=404)
     d = dict(rows[0])
-    if d["doc_type"] in RESTRICTED_DOC_TYPES and user["role"] not in ("owner", "manager"):
+    if user["role"] != "owner":   # only the owner may open/download a document
         return HTMLResponse("<p>Not available</p>", status_code=403)
     if not os.path.exists(d["file_path"]):
         return HTMLResponse("<p>File not found on disk</p>", status_code=404)
@@ -2933,7 +2964,7 @@ def view_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=No
              (doc_id, staff_id), fetch=True)
     if not rows: return HTMLResponse("<p>Document not found</p>", status_code=404)
     d = dict(rows[0])
-    if d["doc_type"] in RESTRICTED_DOC_TYPES and user["role"] not in ("owner", "manager"):
+    if user["role"] != "owner":   # only the owner may open/download a document
         return HTMLResponse("<p>Not available</p>", status_code=403)
     if not os.path.exists(d["file_path"]):
         return HTMLResponse("<p>File not found on disk</p>", status_code=404)
