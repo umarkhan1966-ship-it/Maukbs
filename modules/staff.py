@@ -66,10 +66,17 @@ def _gen_temp_password(length=10):
 
 
 def _staff_access_guard(user, staff_id):
-    """Self-service routes: owner/manager may access anyone; a staff user may
-    access only their own record. Bail (RedirectResponse) otherwise, else None."""
-    if _is_mgr(user):
+    """Staff-scoped routes: the owner may access anyone; a MANAGER only staff at
+    their OWN store; a staff user only their own record. Bail (RedirectResponse)
+    otherwise, else None."""
+    if user.get("role") == "owner":
         return None
+    if user.get("role") == "manager":
+        row = q("SELECT store_name FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+        if row and row[0]["store_name"] and row[0]["store_name"] == user.get("store_name"):
+            return None
+        return RedirectResponse("/staff?msg=You+can+only+access+your+own+store&msg_type=error",
+                                status_code=303)
     if _own_staff_id(user) == staff_id:
         return None
     return RedirectResponse("/my-profile?msg=You+can+only+access+your+own+record&msg_type=error",
@@ -442,9 +449,9 @@ def staff_page(
         active_cls = "border-b-2 border-blue-900 font-black text-blue-900" if show == val else "text-slate-500 hover:text-slate-700"
         tabs += f"<a href='/staff?show={val}' class='px-4 py-2 text-sm {active_cls} transition'>{label}</a>"
 
-    # ── Store filter buttons ──
+    # ── Store filter buttons (owner only — a manager has just their one store) ──
     store_btns = ""
-    if is_owner or user["role"] == "manager":
+    if is_owner:
         for sv, sl in [("","Both Stores"),("Uxbridge","Uxbridge"),("Newbury","Newbury")]:
             cls = "btn-primary" if store == sv else "btn-secondary"
             store_btns += f"<a href='/staff?show={show}&store={sv}' class='{cls}' style='padding:6px 14px;font-size:13px'>{sl}</a>"
@@ -888,9 +895,10 @@ def leave_planner(
     if (r := _require_mgr(user)): return r
     if not year: year = datetime.now().year
 
-    # Get store filter
-    if user["role"] == "manager" and user.get("store_name"):
-        store = store or user["store_name"]
+    # Get store filter — a manager is FORCED to their own store (ignore any
+    # ?store= override), the owner may pick any.
+    if user["role"] == "manager":
+        store = user.get("store_name") or ""
 
     # Get active staff
     conds  = ["is_active=1"]
@@ -981,9 +989,9 @@ def leave_planner(
         # Spacer between months
         grid_html += f"<tr><td colspan='32' style='height:4px;background:#f8fafc'></td></tr>"
 
-    # Store filter buttons
+    # Store filter buttons (owner only — a manager has just their one store)
     store_btns = ""
-    if user["role"] in ("owner","manager"):
+    if user["role"] == "owner":
         for sv,sl in [("","Both"),("Uxbridge","Uxbridge"),("Newbury","Newbury")]:
             cls = "btn-primary" if store==sv else "btn-secondary"
             store_btns += f"<a href='/staff/leave-planner?year={year}&store={sv}' class='{cls}' style='padding:5px 12px;font-size:12px'>{sl}</a>"
@@ -1400,6 +1408,12 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     if user["role"] == "staff":
         return RedirectResponse("/my-profile", status_code=303)
     is_owner = user["role"] == "owner"   # managers get a deliberately trimmed view
+
+    # Managers only see staff at their OWN store (the list already scopes this, but
+    # a hand-typed /staff/<id> for another store must be blocked too).
+    if user["role"] == "manager" and s.get("store_name") != user.get("store_name"):
+        return RedirectResponse("/staff?msg=You+can+only+access+your+own+store&msg_type=error",
+                                status_code=303)
 
     is_leaver = not s["is_active"]
     if is_leaver and user["role"] != "owner":
@@ -2281,6 +2295,11 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
     # holiday / sick / absent) — no worked hours, no daily hours/comments detail,
     # no lifetime history. The owner sees everything.
     is_owner = user["role"] == "owner"
+    if not is_owner:   # managers: own store only
+        _st = q("SELECT store_name FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+        if not _st or _st[0]["store_name"] != user.get("store_name"):
+            return RedirectResponse("/staff?msg=You+can+only+view+your+own+store&msg_type=error",
+                                    status_code=303)
     if not is_owner:
         view = "absences"
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
