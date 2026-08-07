@@ -121,7 +121,11 @@ def do_login(request: Request, username: str = Form(...), password: str = Form(.
       "VALUES (?, ?, datetime('now', '+7 days'))",
       (token, username))
 
-    resp = RedirectResponse("/", status_code=303)
+    # New staff logins are issued a temp password — send them to set their own.
+    from urllib.parse import quote as uq
+    dest = ("/my-profile?msg=" + uq("Please set your own password to finish setting up your account.")
+            if user.get("must_change_pw") else "/")
+    resp = RedirectResponse(dest, status_code=303)
     resp.set_cookie("session", token, httponly=True, samesite="lax",
                     secure=_SECURE_COOKIES, max_age=86400 * 7)
     return resp

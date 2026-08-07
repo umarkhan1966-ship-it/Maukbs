@@ -39,6 +39,24 @@ def _own_staff_id(user):
     return user_staff_id(user)
 
 
+def _gen_username(first, last):
+    """Auto 'firstname.lastname' login name (lowercased, de-punctuated), made
+    unique — appends a number on the rare identical-full-name clash."""
+    base = (re.sub(r"[^a-z0-9]", "", (first or "").lower()) + "." +
+            re.sub(r"[^a-z0-9]", "", (last or "").lower())).strip(".") or "staff"
+    uname, n = base, 1
+    while q("SELECT 1 FROM users WHERE username=?", (uname,), fetch=True):
+        n += 1
+        uname = f"{base}{n}"
+    return uname
+
+
+def _gen_temp_password(length=10):
+    """Readable random temp password (letters+digits), handed over once."""
+    import string
+    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
+
+
 def _staff_access_guard(user, staff_id):
     """Self-service routes: owner/manager may access anyone; a staff user may
     access only their own record. Bail (RedirectResponse) otherwise, else None."""
@@ -1332,6 +1350,25 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     # Leave figure for the cards comes from ATTENDANCE (same helper as the
     # Attendance page), so the profile and Attendance page always agree.
     att_leave = attendance_leave(staff_id, year)
+
+    # Staff-login status card (owner/manager only)
+    login_card = ""
+    if user["role"] in ("owner", "manager"):
+        _lg = q("SELECT username, is_active, must_change_pw FROM users WHERE staff_id=?", (staff_id,), fetch=True)
+        if _lg:
+            _lg = dict(_lg[0])
+            _lstat = ("<span style='color:#16a34a;font-weight:700'>active</span>" if _lg["is_active"]
+                      else "<span style='color:#dc2626;font-weight:700'>disabled</span>")
+            _pw = " &middot; <span style='color:#d97706'>awaiting first-login password change</span>" if _lg.get("must_change_pw") else ""
+            login_card = (f"<div class='card' style='border-left:4px solid #0ea5e9'>"
+                          f"<div style='font-weight:900;color:#0f2942;margin-bottom:4px'>&#128273; Staff Login</div>"
+                          f"<div style='font-size:13px;color:#334155'>Username: <strong class='mono'>{esc(_lg['username'])}</strong> &middot; {_lstat}{_pw}</div>"
+                          f"<div style='font-size:11px;color:#94a3b8;margin-top:6px'>Reset password / disable via <a href='/manage-users' style='color:#0369a1'>Manage Users</a>.</div></div>")
+        elif s["is_active"] and user["role"] == "owner":
+            login_card = (f"<div class='card' style='border-left:4px solid #0ea5e9'>"
+                          f"<div style='font-weight:900;color:#0f2942;margin-bottom:6px'>&#128273; Staff Login</div>"
+                          f"<div style='font-size:13px;color:#64748b;margin-bottom:10px'>No login yet &mdash; create one so {esc(s['first_name'])} can sign in to their own details, leave and documents.</div>"
+                          f"<form method='POST' action='/staff/{staff_id}/create-login'><button type='submit' class='btn-primary'>&#128273; Create login</button></form></div>")
     _plieu = att_leave.get("lieu", 0)
     plieu_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#64748b;margin-top:8px'>"
                   f"<span style='font-size:13px'>&#8505;&#65039;</span>Holiday Taken includes {_plieu} bank holiday{'s' if _plieu != 1 else ''} "
@@ -1438,6 +1475,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     </div>
     {(f"<div class='card' style='border-left:4px solid #dc2626'><div style='font-weight:900;color:#991b1b;margin-bottom:6px'>&#128682; Left" + (f" &middot; {s.get('date_left')}" if s.get('date_left') else "") + "</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('leaving_reason') or '—') + "</div></div>") if is_leaver else ''}
     {(f"<div class='card' style='border-left:4px solid #f59e0b'><div style='font-weight:900;color:#92400e;margin-bottom:6px'>&#128221; Notes</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('notes')) + "</div></div>") if can_edit and s.get('notes') else ''}
+    {login_card}
 
 
         <!-- Leave history -->
@@ -1685,6 +1723,45 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
 
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff/{staff_id}?msg={uq('Profile updated')}", status_code=303)
+
+
+@router.post("/staff/{staff_id}/create-login")
+def create_staff_login(staff_id: int, session: str | None = Cookie(default=None)):
+    """Owner-only: create a staff login linked by staff_id, with an auto username
+    and a one-time temp password (forced change on first login)."""
+    from urllib.parse import quote as uq
+    redir, user = require_login(session)
+    if redir: return redir
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}?msg={uq('Only the owner can create staff logins')}&msg_type=error",
+                                status_code=303)
+    rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+    if not rows:
+        return RedirectResponse("/staff", status_code=303)
+    s = dict(rows[0])
+    ex = q("SELECT username FROM users WHERE staff_id=?", (staff_id,), fetch=True)
+    if ex:
+        return RedirectResponse(f"/staff/{staff_id}?msg={uq('Already has a login: ' + ex[0]['username'])}&msg_type=error",
+                                status_code=303)
+    uname = _gen_username(s["first_name"], s["last_name"])
+    temp  = _gen_temp_password()
+    q("""INSERT INTO users (username, password, full_name, role, store_name, is_active, staff_id, must_change_pw)
+         VALUES(?,?,?,?,?,1,?,1)""",
+      (uname, hash_password(temp), f"{s['first_name']} {s['last_name']}",
+       "staff", s.get("store_name"), staff_id))
+    name = f"{s['first_name']} {s['last_name']}"
+    content = f"""
+    <div class='text-2xl font-black text-slate-800'>&#128273; Login created &mdash; {esc(name)}</div>
+    <div class='card' style='max-width:540px;border-left:5px solid #16a34a'>
+      <p style='color:#334155;margin-bottom:12px'>Give these to {esc(s['first_name'])}. They'll be asked to set their own password the first time they sign in.</p>
+      <div style='background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:14px 16px;font-size:15px'>
+        <div>Username: <strong class='mono'>{esc(uname)}</strong></div>
+        <div style='margin-top:6px'>Temporary password: <strong class='mono'>{esc(temp)}</strong></div>
+      </div>
+      <p style='font-size:12px;color:#94a3b8;margin-top:10px'>&#9888;&#65039; Shown once &mdash; note it now. You can reset it later from Manage Users.</p>
+      <a href='/staff/{staff_id}' class='btn-primary' style='margin-top:14px;display:inline-block'>&larr; Back to profile</a>
+    </div>"""
+    return page("Login created", content, user, "staff")
 
 
 @router.get("/staff/{staff_id}/request-leave", response_class=HTMLResponse)

@@ -180,5 +180,5 @@ async def change_my_password(request: Request, session: str | None = Cookie(defa
     if new != confirm:
         return RedirectResponse(f"/my-profile?msg={uq('New passwords do not match.')}&msg_type=error", status_code=303)
 
-    q("UPDATE users SET password=? WHERE username=?", (hash_password(new), user["username"]))
+    q("UPDATE users SET password=?, must_change_pw=0 WHERE username=?", (hash_password(new), user["username"]))
     return RedirectResponse(f"/my-profile?msg={uq('Password updated.')}", status_code=303)
