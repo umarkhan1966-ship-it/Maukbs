@@ -373,6 +373,14 @@ def ensure_staff_tables():
     for row in nmw_data:
         try: c.execute("INSERT OR IGNORE INTO nmw_rates (effective_date,rate_21_plus,rate_18_20,rate_16_17,rate_apprentice) VALUES(?,?,?,?,?)", row)
         except: pass
+
+    # ── Migration: two-stage leave approval (manager recommends → owner signs off) ──
+    _lr_cols = {r[1] for r in c.execute("PRAGMA table_info(leave_requests)")}
+    for _name, _ddl in [("mgr_approved_by", "mgr_approved_by TEXT"),
+                        ("mgr_approved_at", "mgr_approved_at TEXT")]:
+        if _name not in _lr_cols:
+            c.execute(f"ALTER TABLE leave_requests ADD COLUMN {_ddl}")
+
     conn.commit()
     conn.close()
 
@@ -411,11 +419,18 @@ def staff_page(
     staff = q(f"SELECT * FROM staff_profiles {where} ORDER BY store_name, first_name",
               params, fetch=True) or []
 
-    # Pending leave requests count
-    pending_leave = q("""SELECT COUNT(*) as n FROM leave_requests lr
-                         JOIN staff_profiles sp ON lr.staff_id=sp.staff_id
-                         WHERE lr.status='pending'""", fetch=True)
-    pending_n = pending_leave[0]["n"] if pending_leave else 0
+    # Leave-request badge — count only what THIS user needs to action:
+    #   owner   → awaiting final sign-off (mgr_approved) + any unreviewed pending
+    #   manager → own-store requests still pending their approval
+    if is_owner:
+        _cnt = q("""SELECT COUNT(*) n FROM leave_requests
+                    WHERE status IN ('pending','mgr_approved')""", fetch=True)
+    else:
+        _cnt = q("""SELECT COUNT(*) n FROM leave_requests lr
+                    JOIN staff_profiles sp ON lr.staff_id=sp.staff_id
+                    WHERE lr.status='pending' AND sp.store_name=?""",
+                 (user.get("store_name") or "",), fetch=True)
+    pending_n = _cnt[0]["n"] if _cnt else 0
 
     flash = f"<div class='flash-{'success' if msg_type=='success' else 'error'}'>{msg}</div>" if msg else ""
 
@@ -754,43 +769,46 @@ def new_staff_form(session: str | None = Cookie(default=None)):
 
 
 @router.get("/staff/leave-requests", response_class=HTMLResponse)
-def leave_requests(session: str | None = Cookie(default=None)):
+def leave_requests(session: str | None = Cookie(default=None), msg: str = "", msg_type: str = "success"):
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] not in ("owner","manager"):
         return RedirectResponse("/staff", status_code=303)
 
-    pending = q("""
-        SELECT lr.*, sp.first_name, sp.last_name, sp.store_name, sp.contracted_hrs
-        FROM leave_requests lr
-        JOIN staff_profiles sp ON lr.staff_id=sp.staff_id
-        WHERE lr.status='pending'
-        ORDER BY lr.date_from ASC
-    """, fetch=True) or []
+    is_owner = user["role"] == "owner"
+    # Managers only ever see their own store; the owner sees every store.
+    scope, sp = ("", [])
+    if not is_owner:
+        scope = "AND sp.store_name = ?"
+        sp    = [user.get("store_name") or ""]
 
-    recent = q("""
-        SELECT lr.*, sp.first_name, sp.last_name, sp.store_name
-        FROM leave_requests lr
-        JOIN staff_profiles sp ON lr.staff_id=sp.staff_id
-        WHERE lr.status != 'pending'
-        ORDER BY lr.created_at DESC LIMIT 20
-    """, fetch=True) or []
+    def _fetch(where, params, order):
+        return q(f"""SELECT lr.*, sp.first_name, sp.last_name, sp.store_name
+                     FROM leave_requests lr
+                     JOIN staff_profiles sp ON lr.staff_id=sp.staff_id
+                     WHERE {where} {scope} ORDER BY {order}""",
+                 params + sp, fetch=True) or []
 
-    def req_row(lr, show_actions=True):
+    def req_row(lr, action="none", cols=9):
         lr    = dict(lr)
         name  = f"{lr['first_name']} {lr['last_name']}"
         ltype = ABSENCE_TYPES.get(lr['leave_type'], lr['leave_type'])
         badge = {"approved":"<span class='badge-paid'>Approved</span>",
-                 "pending": "<span class='badge-partial'>Pending</span>",
+                 "pending": "<span class='badge-partial'>Pending manager</span>",
+                 "mgr_approved":"<span class='badge-partial' style='background:#e0e7ff;color:#3730a3'>Manager OK · awaiting owner</span>",
                  "declined":"<span class='badge-overdue'>Declined</span>"}.get(lr["status"],"")
+        # action: "approve" shows Approve/Decline; "signoff" is the owner's final
+        # sign-off wording; "none" is read-only.
         actions = ""
-        if show_actions:
+        if action in ("approve", "signoff"):
+            label = "🖊️ Sign off" if action == "signoff" else "✅ Approve"
             actions = f"""
             <form method='POST' action='/staff/leave-requests/{lr['request_id']}/approve' style='display:inline'>
-              <button type='submit' class='btn-success' style='padding:4px 10px;font-size:11px'>✅ Approve</button></form>
+              <button type='submit' class='btn-success' style='padding:4px 10px;font-size:11px'>{label}</button></form>
             <form method='POST' action='/staff/leave-requests/{lr['request_id']}/decline' style='display:inline'
                   onsubmit="return confirm('Decline this leave request?');">
               <button type='submit' class='btn-danger' style='padding:4px 10px;font-size:11px'>❌ Decline</button></form>"""
+        action_cell = f"<td><div style='display:flex;gap:4px'>{actions}</div></td>" if action != "none" else "<td></td>"
         return f"""<tr>
           <td style='font-weight:700'>{name}</td>
           <td style='font-size:12px;color:#64748b'>{lr.get('store_name','')}</td>
@@ -800,39 +818,62 @@ def leave_requests(session: str | None = Cookie(default=None)):
           <td class='mono'>{lr['days_taken']}</td>
           <td>{badge}</td>
           <td style='font-size:12px;color:#64748b'>{lr.get('notes') or '—'}</td>
-          <td><div style='display:flex;gap:4px'>{actions}</div></td>
+          {action_cell}
         </tr>"""
 
-    pending_rows = "".join(req_row(lr) for lr in pending)
-    recent_rows  = "".join(req_row(lr, False) for lr in recent)
+    def _table(title, colour, rows_html, empty):
+        return f"""
+        <div class='card' style='padding:0;overflow:hidden'>
+          <div style='padding:12px 16px;background:{colour};color:white;font-weight:700;font-size:14px'>{title}</div>
+          <div style='overflow-x:auto'>
+            <table class='tbl'>
+              <thead><tr><th>Staff</th><th>Store</th><th>Type</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th>Notes</th><th>Action</th></tr></thead>
+              <tbody>{rows_html or f'<tr><td colspan="9" style="text-align:center;padding:24px;color:#94a3b8">{empty}</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>"""
+
+    recent = _fetch("lr.status IN ('approved','declined')", [], "lr.created_at DESC LIMIT 20")
+    recent_html = "".join(req_row(lr, "none") for lr in recent)
+
+    if is_owner:
+        # The owner's sign-off queue first, then anything staff submitted that no
+        # manager has looked at yet (the owner can act on those directly too).
+        signoff = _fetch("lr.status='mgr_approved'", [], "lr.date_from ASC")
+        newpend = _fetch("lr.status='pending'", [], "lr.date_from ASC")
+        blocks  = (
+            _table(f"🖊️ Awaiting your sign-off ({len(signoff)})", "#7c3aed",
+                   "".join(req_row(lr, "signoff") for lr in signoff),
+                   "Nothing awaiting sign-off") +
+            _table(f"⏳ Not yet seen by a manager ({len(newpend)})", "#d97706",
+                   "".join(req_row(lr, "signoff") for lr in newpend),
+                   "No unreviewed requests") +
+            _table("Recent Decisions", "#0f2942", recent_html, "No recent decisions"))
+    else:
+        # Manager: their approval queue, then what they've passed up to the owner.
+        needs = _fetch("lr.status='pending'", [], "lr.date_from ASC")
+        upped = _fetch("lr.status='mgr_approved'", [], "lr.date_from ASC")
+        blocks = (
+            _table(f"⏳ Needs your approval ({len(needs)})", "#d97706",
+                   "".join(req_row(lr, "approve") for lr in needs),
+                   "No requests awaiting you") +
+            _table(f"🖊️ Awaiting owner sign-off ({len(upped)})", "#7c3aed",
+                   "".join(req_row(lr, "none") for lr in upped),
+                   "Nothing awaiting the owner") +
+            _table("Recent Decisions", "#0f2942", recent_html, "No recent decisions"))
+
+    flash = ""
+    if msg:
+        cls = "flash-success" if msg_type == "success" else "flash-error"
+        flash = f"<div class='{cls}'>{esc(msg)}</div>"
 
     content = f"""
+    {flash}
     <div class='flex justify-between items-center'>
       <div class='text-2xl font-black text-slate-800'>📋 Leave Requests</div>
       <a href='/staff' class='btn-secondary'>← Back to Staff</a>
     </div>
-
-    <div class='card' style='padding:0;overflow:hidden'>
-      <div style='padding:12px 16px;background:#d97706;color:white;font-weight:700;font-size:14px'>
-        ⏳ Pending Approval ({len(pending)})
-      </div>
-      <div style='overflow-x:auto'>
-        <table class='tbl'>
-          <thead><tr><th>Staff</th><th>Store</th><th>Type</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th>Notes</th><th>Action</th></tr></thead>
-          <tbody>{pending_rows or '<tr><td colspan="9" style="text-align:center;padding:24px;color:#94a3b8">No pending requests</td></tr>'}</tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class='card' style='padding:0;overflow:hidden'>
-      <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>Recent Decisions</div>
-      <div style='overflow-x:auto'>
-        <table class='tbl'>
-          <thead><tr><th>Staff</th><th>Store</th><th>Type</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th>Notes</th><th></th></tr></thead>
-          <tbody>{recent_rows or '<tr><td colspan="9" style="text-align:center;padding:24px;color:#94a3b8">No recent decisions</td></tr>'}</tbody>
-        </table>
-      </div>
-    </div>"""
+    {blocks}"""
     return page("Leave Requests", content, user, "staff")
 
 
@@ -1860,19 +1901,46 @@ async def submit_leave(staff_id: int, request: Request, session: str | None = Co
     except Exception:
         days = 1
 
-    # Auto-approve for manager/owner, else pending
-    status = "approved" if user["role"] in ("owner","manager") else "pending"
+    # Two-stage approval: the owner's own entry is final; a manager entering leave
+    # counts as the manager stage (still needs owner sign-off); a staff request
+    # starts at the very beginning and waits for the manager.
+    mgr_by = mgr_at = None
+    if user["role"] == "owner":
+        status = "approved"
+    elif user["role"] == "manager":
+        status = "mgr_approved"
+        mgr_by = user.get("username")
+        mgr_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    else:
+        status = "pending"
 
     q("""INSERT INTO leave_requests
         (staff_id, leave_type, date_from, date_to, days_taken,
-         status, requested_by, notes)
-        VALUES(?,?,?,?,?,?,?,?)""",
+         status, requested_by, notes, mgr_approved_by, mgr_approved_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)""",
       (staff_id, leave_type, date_from, date_to, days,
-       status, user.get("username"), notes or None))
+       status, user.get("username"), notes or None, mgr_by, mgr_at))
 
     from urllib.parse import quote as uq
-    msg = "Leave approved ✅" if status=="approved" else "Leave request submitted — awaiting approval ⏳"
+    msg = {"approved": "Leave approved ✅",
+           "mgr_approved": "Recorded — awaiting owner sign-off ⏳",
+           "pending": "Leave request submitted — awaiting approval ⏳"}[status]
     return RedirectResponse(f"/staff/{staff_id}?msg={uq(msg)}", status_code=303)
+
+
+def _leave_req_with_store(req_id: int):
+    """The leave request joined to its staff member's store, or None."""
+    rows = q("""SELECT lr.*, sp.store_name FROM leave_requests lr
+                JOIN staff_profiles sp ON lr.staff_id = sp.staff_id
+                WHERE lr.request_id = ?""", (req_id,), fetch=True)
+    return dict(rows[0]) if rows else None
+
+
+def _mgr_can_act(user, lr) -> bool:
+    """A manager may only act on requests for their OWN store."""
+    if user["role"] == "owner":
+        return True
+    return bool(user.get("store_name")) and lr.get("store_name") == user["store_name"]
 
 
 @router.post("/staff/leave-requests/{req_id}/approve")
@@ -1880,9 +1948,26 @@ def approve_leave(req_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
     if (r := _require_mgr(user)): return r
-    q("UPDATE leave_requests SET status='approved', approved_by=?, approved_at=datetime('now') WHERE request_id=?",
-      (user.get("username"), req_id))
-    return RedirectResponse("/staff/leave-requests", status_code=303)
+
+    from urllib.parse import quote as uq
+    lr = _leave_req_with_store(req_id)
+    if not lr or not _mgr_can_act(user, lr):
+        return RedirectResponse(f"/staff/leave-requests?msg={uq('Not permitted')}&msg_type=error", status_code=303)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if user["role"] == "owner":
+        # Owner gives the final sign-off (works from pending or mgr_approved).
+        q("""UPDATE leave_requests SET status='approved', approved_by=?, approved_at=?
+             WHERE request_id=?""", (user.get("username"), now, req_id))
+        msg = "Leave approved ✅"
+    else:
+        # Manager stage: recommend → moves into the owner's sign-off queue.
+        if lr["status"] != "pending":
+            return RedirectResponse(f"/staff/leave-requests?msg={uq('Already actioned')}&msg_type=error", status_code=303)
+        q("""UPDATE leave_requests SET status='mgr_approved', mgr_approved_by=?, mgr_approved_at=?
+             WHERE request_id=?""", (user.get("username"), now, req_id))
+        msg = "Approved — sent to owner for sign-off ⏳"
+    return RedirectResponse(f"/staff/leave-requests?msg={uq(msg)}", status_code=303)
 
 
 @router.post("/staff/leave-requests/{req_id}/decline")
@@ -1890,9 +1975,21 @@ def decline_leave(req_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
     if (r := _require_mgr(user)): return r
-    q("UPDATE leave_requests SET status='declined', approved_by=?, approved_at=datetime('now') WHERE request_id=?",
-      (user.get("username"), req_id))
-    return RedirectResponse("/staff/leave-requests", status_code=303)
+
+    from urllib.parse import quote as uq
+    lr = _leave_req_with_store(req_id)
+    if not lr or not _mgr_can_act(user, lr):
+        return RedirectResponse(f"/staff/leave-requests?msg={uq('Not permitted')}&msg_type=error", status_code=303)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # A manager records who declined in the manager field; the owner in the final field.
+    if user["role"] == "owner":
+        q("""UPDATE leave_requests SET status='declined', approved_by=?, approved_at=?
+             WHERE request_id=?""", (user.get("username"), now, req_id))
+    else:
+        q("""UPDATE leave_requests SET status='declined', mgr_approved_by=?, mgr_approved_at=?
+             WHERE request_id=?""", (user.get("username"), now, req_id))
+    return RedirectResponse(f"/staff/leave-requests?msg={uq('Leave declined')}", status_code=303)
 
 
 @router.get("/staff/{staff_id}/pay-history", response_class=HTMLResponse)
