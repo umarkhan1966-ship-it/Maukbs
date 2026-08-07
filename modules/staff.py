@@ -2180,6 +2180,12 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
     if redir: return redir
     if user["role"] not in ("owner", "manager"):
         return RedirectResponse("/staff", status_code=303)
+    # Managers get a deliberately trimmed view: absence FLAGS only (who's in /
+    # holiday / sick / absent) — no worked hours, no daily hours/comments detail,
+    # no lifetime history. The owner sees everything.
+    is_owner = user["role"] == "owner"
+    if not is_owner:
+        view = "absences"
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
     s = dict(rows[0]); name = f"{s['first_name']} {s['last_name']}"
@@ -2203,7 +2209,8 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         def _cards(label, sm):
             def dd(k): return sm.get(k, {}).get("days", 0)
             w = sm.get("Worked", {})
-            spec = [("Worked", str(w.get("days", 0)), f"days · {w.get('hw',0):,.0f}h", "#16a34a"),
+            worked_sub = f"days · {w.get('hw',0):,.0f}h" if is_owner else "days"
+            spec = [("Worked", str(w.get("days", 0)), worked_sub, "#16a34a"),
                     ("Holiday", str(dd("Holiday")), "days", "#0369a1"),
                     ("Sick", str(dd("Sick")), "days", "#dc2626"),
                     ("Maternity", str(dd("Maternity")), "days", "#7c3aed"),
@@ -2283,7 +2290,7 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
             st = "background:#0f2942;color:#fff" if on else "background:#fff;color:#0f2942;border:1px solid #cbd5e1"
             return (f"<a href='/staff/{staff_id}/attendance?year={sel}&view={v}' style='{st};padding:4px 12px;"
                     f"border-radius:8px;font-weight:700;font-size:12px;text-decoration:none'>{label}</a>")
-        toggle = _vt("all", "All days") + " " + _vt("absences", "Absences only")
+        toggle = (_vt("all", "All days") + " " + _vt("absences", "Absences only")) if is_owner else ""
 
         _col = {"Worked":"#16a34a","Holiday":"#0369a1","Sick":"#dc2626","Maternity":"#7c3aed","Bank Holiday":"#475569"}
         _bg  = {"Holiday":"#eff6ff","Sick":"#fef2f2","Maternity":"#faf5ff","Bank Holiday":"#f1f5f9"}
@@ -2291,21 +2298,30 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
         det = q(f"""SELECT work_date,day,status,hours_worked,paid_hours,comments
                     FROM staff_attendance WHERE staff_id=? AND substr(work_date,1,4)=? {vf}
                     ORDER BY work_date DESC""", (staff_id, sel), fetch=True) or []
-        rec_html = "".join(
-            f"<tr style='background:{_bg.get(r['status'],'')}'>"
-            f"<td class='mono' style='font-size:12px'>{_uk(r['work_date'])}</td>"
-            f"<td style='font-size:12px'>{r['day'] or ''}</td>"
-            f"<td><span style='color:{_col.get(r['status'],'#64748b')};font-weight:{'800' if r['status']!='Worked' else '600'};font-size:12px'>{r['status']}</span></td>"
-            f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['hours_worked']) if r['hours_worked'] is not None else '—'}</td>"
-            f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['paid_hours']) if r['paid_hours'] is not None else '—'}</td>"
-            f"<td style='font-size:12px;color:#64748b'>{esc(r['comments'] or '')}</td></tr>" for r in det)
+        if is_owner:
+            det_head = ("<tr><th>Date</th><th>Day</th><th>Status</th><th style='text-align:right'>Hours</th>"
+                        "<th style='text-align:right'>Paid</th><th>Comments</th></tr>")
+            det_cols = 6
+            rec_html = "".join(
+                f"<tr style='background:{_bg.get(r['status'],'')}'>"
+                f"<td class='mono' style='font-size:12px'>{_uk(r['work_date'])}</td>"
+                f"<td style='font-size:12px'>{r['day'] or ''}</td>"
+                f"<td><span style='color:{_col.get(r['status'],'#64748b')};font-weight:{'800' if r['status']!='Worked' else '600'};font-size:12px'>{r['status']}</span></td>"
+                f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['hours_worked']) if r['hours_worked'] is not None else '—'}</td>"
+                f"<td class='mono' style='text-align:right;font-size:12px'>{('%.2f'%r['paid_hours']) if r['paid_hours'] is not None else '—'}</td>"
+                f"<td style='font-size:12px;color:#64748b'>{esc(r['comments'] or '')}</td></tr>" for r in det)
+        else:
+            # Managers: absence flags only — no hours, no comments.
+            det_head = "<tr><th>Date</th><th>Day</th><th>Status</th></tr>"
+            det_cols = 3
+            rec_html = "".join(
+                f"<tr style='background:{_bg.get(r['status'],'')}'>"
+                f"<td class='mono' style='font-size:12px'>{_uk(r['work_date'])}</td>"
+                f"<td style='font-size:12px'>{r['day'] or ''}</td>"
+                f"<td><span style='color:{_col.get(r['status'],'#64748b')};font-weight:800;font-size:12px'>{r['status']}</span></td></tr>"
+                for r in det)
 
-        body = f"""
-        <div class='card' style='margin-top:14px;padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>
-          <span style='font-size:13px;font-weight:800;color:#334155;margin-right:4px'>Year:</span>{chips}
-        </div>
-        {cards}
-        {leave_block}
+        lifetime_block = f"""
         <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
           <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px'>By year (lifetime)</div>
           <div style='overflow-x:auto'><table class='tbl'>
@@ -2314,15 +2330,23 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
               <th style='text-align:right'>Maternity</th><th style='text-align:right'>Bank Hol</th></tr></thead>
             <tbody>{yr_html}</tbody>
           </table></div>
+        </div>""" if is_owner else ""
+
+        _daily_title = f"Daily record — {sel}" if is_owner else f"Absences — {sel}"
+        body = f"""
+        <div class='card' style='margin-top:14px;padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>
+          <span style='font-size:13px;font-weight:800;color:#334155;margin-right:4px'>Year:</span>{chips}
         </div>
+        {cards}
+        {leave_block}
+        {lifetime_block}
         <div class='card' style='padding:0;overflow:hidden;margin-top:14px'>
           <div style='padding:12px 16px;background:#0f2942;color:white;font-weight:700;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
-            <span>Daily record — {sel}</span><span style='display:flex;gap:6px'>{toggle}</span>
+            <span>{_daily_title}</span><span style='display:flex;gap:6px'>{toggle}</span>
           </div>
           <div style='overflow-x:auto'><table class='tbl'>
-            <thead><tr><th>Date</th><th>Day</th><th>Status</th><th style='text-align:right'>Hours</th>
-              <th style='text-align:right'>Paid</th><th>Comments</th></tr></thead>
-            <tbody>{rec_html or "<tr><td colspan='6' style='text-align:center;padding:20px;color:#94a3b8'>No entries for this selection</td></tr>"}</tbody>
+            <thead>{det_head}</thead>
+            <tbody>{rec_html or f"<tr><td colspan='{det_cols}' style='text-align:center;padding:20px;color:#94a3b8'>No entries for this selection</td></tr>"}</tbody>
           </table></div>
         </div>"""
 
