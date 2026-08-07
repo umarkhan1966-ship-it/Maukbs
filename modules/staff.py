@@ -1440,6 +1440,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         <div><span style='color:#94a3b8;font-weight:700'>Right to Work</span><br><a href='/staff/{staff_id}/documents' style='text-decoration:none'>{_rtw_status_summary(get_rtw_check(staff_id))}</a></div>
       </div>
     </div>
+    {(f"<div class='card' style='border-left:4px solid #dc2626'><div style='font-weight:900;color:#991b1b;margin-bottom:6px'>&#128682; Left" + (f" &middot; {s.get('date_left')}" if s.get('date_left') else "") + "</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('leaving_reason') or '—') + "</div></div>") if is_leaver else ''}
     {(f"<div class='card' style='border-left:4px solid #f59e0b'><div style='font-weight:900;color:#92400e;margin-bottom:6px'>&#128221; Notes</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('notes')) + "</div></div>") if can_edit and s.get('notes') else ''}
 
 
@@ -1575,7 +1576,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
         {fi('salary_amount','Salary Amount (£/yr)','number',sv.get('salary_amount'))}
         {fi('is_active','Status',opts=active_opts,val=str(sv.get('is_active',1)))}
         {fi('date_left','Date Left','date',sv.get('date_left')) if is_edit else ''}
-        {fi('leaving_reason','Reason for Leaving','text',sv.get('leaving_reason')) if is_edit else ''}
+        {fi('leaving_reason','Reason for Leaving','textarea',sv.get('leaving_reason'),full=True) if is_edit else ''}
         {fi('notes','Notes / Comments','textarea',sv.get('notes'),full=True,placeholder='Internal notes — e.g. resigned via WhatsApp 5 Aug (effective 1 Aug); on reduced hours; etc.')}
       </div>
     </div>"""
