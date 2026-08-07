@@ -1440,6 +1440,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         <div><span style='color:#94a3b8;font-weight:700'>Right to Work</span><br><a href='/staff/{staff_id}/documents' style='text-decoration:none'>{_rtw_status_summary(get_rtw_check(staff_id))}</a></div>
       </div>
     </div>
+    {(f"<div class='card' style='border-left:4px solid #f59e0b'><div style='font-weight:900;color:#92400e;margin-bottom:6px'>&#128221; Notes</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('notes')) + "</div></div>") if can_edit and s.get('notes') else ''}
 
 
         <!-- Leave history -->
@@ -1516,17 +1517,21 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
         _exist[_key] = f"{_d.get('store_name') or '?'}, joined {_d.get('date_joined') or '?'}, {'Active' if _d.get('is_active') else 'Left'}"
     _exist_json = _json.dumps(_exist)
 
-    def fi(name, label, ftype="text", val=None, req=False, opts=None, disabled=False, placeholder=""):
+    def fi(name, label, ftype="text", val=None, req=False, opts=None, disabled=False, placeholder="", full=False):
         safe = val if val is not None else ""
         req_a = "required" if req else ""
         dis_a = "disabled style='background:#f8fafc;color:#94a3b8'" if disabled else ""
         step  = "step='0.01'" if ftype=="number" else ""
         ph    = f"placeholder='{placeholder}'" if placeholder else ""
+        wrap  = " style='grid-column:1/-1'" if full else ""
+        if ftype == "textarea":
+            return (f"<div{wrap}><label>{label}</label><textarea name='{name}' rows='2' {ph} "
+                    f"style='width:100%;font-family:inherit;font-size:13px'>{esc(safe)}</textarea></div>")
         if opts is not None:
             o = "".join(f"<option value='{ov}' {'selected' if str(safe)==str(ov) else ''}>{ol}</option>"
                         for ov,ol in opts)
-            return f"<div><label>{label}</label><select name='{name}' {req_a} {dis_a}>{o}</select></div>"
-        return f"<div><label>{label}</label><input type='{ftype}' name='{name}' value='{esc(safe)}' {req_a} {dis_a} {step} {ph}></div>"
+            return f"<div{wrap}><label>{label}</label><select name='{name}' {req_a} {dis_a}>{o}</select></div>"
+        return f"<div{wrap}><label>{label}</label><input type='{ftype}' name='{name}' value='{esc(safe)}' {req_a} {dis_a} {step} {ph}></div>"
 
     store_opts = [("","-- Select --"),("Uxbridge","Uxbridge"),("Newbury","Newbury")]
     sex_opts   = [("","--"),("M","Male"),("F","Female"),("O","Other")]
@@ -1571,6 +1576,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
         {fi('is_active','Status',opts=active_opts,val=str(sv.get('is_active',1)))}
         {fi('date_left','Date Left','date',sv.get('date_left')) if is_edit else ''}
         {fi('leaving_reason','Reason for Leaving','text',sv.get('leaving_reason')) if is_edit else ''}
+        {fi('notes','Notes / Comments','textarea',sv.get('notes'),full=True,placeholder='Internal notes — e.g. resigned via WhatsApp 5 Aug (effective 1 Aug); on reduced hours; etc.')}
       </div>
     </div>"""
 
@@ -1628,8 +1634,8 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
         (staff_number,first_name,last_name,store_name,sex,phone,email,
          address_1,address_2,address_3,postcode,date_joined,date_of_birth,
          contracted_hrs,hourly_rate,is_salaried,salary_amount,is_active,
-         job_title,employment_type,reports_to,notice_period)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         job_title,employment_type,reports_to,notice_period,notes)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (next_no, fv("first_name"), fv("last_name"),
        fv("store_name"), fv("sex"), fv("phone"), fv("email"),
        fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
@@ -1638,7 +1644,8 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
        fv("is_salaried","N"), fn("salary_amount"),
        int(form.get("is_active", 1)),
        fv("job_title") or None, fv("employment_type") or None,
-       fv("reports_to") or None, fv("notice_period") or None))
+       fv("reports_to") or None, fv("notice_period") or None,
+       fv("notes") or None))
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff?msg={uq('Staff member added successfully')}", status_code=303)
 
@@ -1659,7 +1666,7 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
             phone=?,email=?,address_1=?,address_2=?,address_3=?,postcode=?,
             date_joined=?,date_of_birth=?,contracted_hrs=?,hourly_rate=?,
             is_salaried=?,salary_amount=?,is_active=?,date_left=?,leaving_reason=?,
-            job_title=?,employment_type=?,reports_to=?,notice_period=?
+            job_title=?,employment_type=?,reports_to=?,notice_period=?,notes=?
             WHERE staff_id=?""",
           (form.get("staff_number") or None, fv("first_name"), fv("last_name"),
            fv("store_name"), fv("sex"), fv("phone"), fv("email"),
@@ -1671,6 +1678,7 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
            fv("date_left") or None, fv("leaving_reason") or None,
            fv("job_title") or None, fv("employment_type") or None,
            fv("reports_to") or None, fv("notice_period") or None,
+           fv("notes") or None,
            staff_id))
     else:
         # Staff can only update personal contact details
