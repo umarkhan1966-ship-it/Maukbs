@@ -33,6 +33,14 @@ def _require_mgr(user):
     return None
 
 
+def _require_owner(user):
+    """Bail (RedirectResponse) if the user isn't the owner, else None. Used for
+    the sensitive areas managers must never reach (pay, edit, entitlement)."""
+    if user.get("role") != "owner":
+        return RedirectResponse("/?msg=That+area+is+owner+only&msg_type=error", status_code=303)
+    return None
+
+
 def _own_staff_id(user):
     """staff_id of the logged-in user's own profile — via the robust users.staff_id
     link (falls back to full-name match for any unlinked legacy account), or None."""
@@ -473,6 +481,10 @@ def staff_page(
         rate = f"£{s['hourly_rate']:.2f}/hr" if s.get("hourly_rate") else "—"
         hrs  = f"{s['contracted_hrs']}h/wk" if s.get("contracted_hrs") else "—"
         joined = s.get("date_joined") or "—"
+        # Pay rate + edit are owner-only on the list card.
+        rate_cell = (f"<div><div style='font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase'>Rate</div>"
+                     f"<div style='font-size:13px;font-weight:600;color:#334155'>{rate}</div></div>") if is_owner else ""
+        edit_btn = f"<a href='/staff/{sid}/edit' class='btn-secondary' style='padding:5px 12px;font-size:12px'>&#9999;&#65039; Edit</a>" if is_owner else ""
 
         cards_html += f"""
         <div class='card' style='padding:0;overflow:hidden'>
@@ -483,7 +495,7 @@ def staff_page(
             </div>
             <div style='display:flex;gap:8px'>
               <a href='/staff/{sid}' class='btn-primary' style='padding:5px 12px;font-size:12px'>👁 View</a>
-              <a href='/staff/{sid}/edit' class='btn-secondary' style='padding:5px 12px;font-size:12px'>✏️ Edit</a>
+              {edit_btn}
             </div>
           </div>
           <div style='padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px'>
@@ -491,8 +503,7 @@ def staff_page(
                  <div style='font-size:13px;font-weight:600;color:#334155'>{joined}</div></div>
             <div><div style='font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase'>Hours</div>
                  <div style='font-size:13px;font-weight:600;color:#334155'>{hrs}</div></div>
-            <div><div style='font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase'>Rate</div>
-                 <div style='font-size:13px;font-weight:600;color:#334155'>{rate}</div></div>
+            {rate_cell}
             <div><div style='font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase'>Leave Balance {year}</div>
                  <div style='font-size:13px;font-weight:700;color:{bal_col}'>{bal_fmt} left <span style='color:#94a3b8;font-weight:400'>({tak_fmt} of {ent_fmt})</span></div></div>
           </div>
@@ -1336,11 +1347,10 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         return RedirectResponse("/staff", status_code=303)
     s = dict(rows[0])
 
-    # Access control — staff can only see their own profile
+    # Staff never use the full /staff profile — they get their own limited self-view.
     if user["role"] == "staff":
-        my_id = _own_staff_id(user)
-        if my_id != staff_id:
-            return RedirectResponse(f"/staff/{my_id}" if my_id else "/", status_code=303)
+        return RedirectResponse("/my-profile", status_code=303)
+    is_owner = user["role"] == "owner"   # managers get a deliberately trimmed view
 
     is_leaver = not s["is_active"]
     if is_leaver and user["role"] != "owner":
@@ -1351,9 +1361,9 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     # Attendance page), so the profile and Attendance page always agree.
     att_leave = attendance_leave(staff_id, year)
 
-    # Staff-login status card (owner/manager only)
+    # Staff-login status card — owner only.
     login_card = ""
-    if user["role"] in ("owner", "manager"):
+    if is_owner:
         _lg = q("SELECT username, is_active, must_change_pw FROM users WHERE staff_id=?", (staff_id,), fetch=True)
         if _lg:
             _lg = dict(_lg[0])
@@ -1369,6 +1379,21 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
                           f"<div style='font-weight:900;color:#0f2942;margin-bottom:6px'>&#128273; Staff Login</div>"
                           f"<div style='font-size:13px;color:#64748b;margin-bottom:10px'>No login yet &mdash; create one so {esc(s['first_name'])} can sign in to their own details, leave and documents.</div>"
                           f"<form method='POST' action='/staff/{staff_id}/create-login'><button type='submit' class='btn-primary'>&#128273; Create login</button></form></div>")
+    # Personal Details card — OWNER ONLY (holds DOB / address / phone / pay / RTW).
+    personal_card = ""
+    if is_owner:
+        personal_card = f"""<div class='card'>
+      <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Personal Details</div>
+      <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(200px,1fr));font-size:13px'>
+        <div><span style='color:#94a3b8;font-weight:700'>Date of Birth</span><br>{s.get('date_of_birth') or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Phone</span><br>{esc(s.get('phone')) or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Email</span><br>{esc(s.get('email')) or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Address</span><br>{esc(', '.join(filter(None,[s.get('address_1'),s.get('address_2'),s.get('address_3'),s.get('postcode')]))) or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Date Joined</span><br>{s.get('date_joined') or '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Hourly Rate</span><br>{'£'+str(s['hourly_rate'])+'/hr' if s.get('hourly_rate') else '—'}</div>
+        <div><span style='color:#94a3b8;font-weight:700'>Right to Work</span><br><a href='/staff/{staff_id}/documents' style='text-decoration:none'>{_rtw_status_summary(get_rtw_check(staff_id))}</a></div>
+      </div>
+    </div>"""
     _plieu = att_leave.get("lieu", 0)
     plieu_note = (f"<div style='display:flex;align-items:center;gap:5px;font-size:11px;color:#64748b;margin-top:8px'>"
                   f"<span style='font-size:13px'>&#8505;&#65039;</span>Holiday Taken includes {_plieu} bank holiday{'s' if _plieu != 1 else ''} "
@@ -1419,13 +1444,13 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         <div style='color:#64748b;font-size:13px'>{s.get('store_name') or ''} {'· Left ' + s['date_left'] if is_leaver and s.get('date_left') else ''}</div>
       </div>
       <div style='display:flex;gap:8px;flex-wrap:wrap'>
-        {'<a href="/staff/' + str(staff_id) + '/edit" class="btn-primary">✏️ Edit Profile</a>' if can_edit else ''}
+        {'<a href="/staff/' + str(staff_id) + '/edit" class="btn-primary">✏️ Edit Profile</a>' if is_owner else ''}
         <a href='/staff/{staff_id}/request-leave' class='btn-secondary'>📅 Request Leave</a>
-        {'<a href="/staff/' + str(staff_id) + '/pay-history" class="btn-secondary">💰 Pay History</a>' if can_edit else ''}
-        {'<a href="/staff/' + str(staff_id) + '/set-entitlement" class="btn-secondary">⚙️ Set Entitlement</a>' if can_edit else ''}
+        {'<a href="/staff/' + str(staff_id) + '/pay-history" class="btn-secondary">💰 Pay History</a>' if is_owner else ''}
+        {'<a href="/staff/' + str(staff_id) + '/set-entitlement" class="btn-secondary">⚙️ Set Entitlement</a>' if is_owner else ''}
         <a href='/staff/{staff_id}/documents' class='btn-secondary'>&#128193; Documents</a>
         {'<a href="/staff/' + str(staff_id) + '/attendance" class="btn-secondary">🕒 Attendance</a>' if can_edit else ''}
-        <a href='/staff/{staff_id}/onboarding' class='btn-secondary'>&#128203; Onboarding</a>
+        {'<a href="/staff/' + str(staff_id) + '/onboarding" class="btn-secondary">&#128203; Onboarding</a>' if is_owner else ''}
       </div>
     </div>
 
@@ -1460,21 +1485,10 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     {plieu_note}
     {pproj_note}
 
-    <!-- Personal details -->
-    <div class='card'>
-      <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Personal Details</div>
-      <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(200px,1fr));font-size:13px'>
-        <div><span style='color:#94a3b8;font-weight:700'>Date of Birth</span><br>{s.get('date_of_birth') or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Phone</span><br>{esc(s.get('phone')) or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Email</span><br>{esc(s.get('email')) or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Address</span><br>{esc(', '.join(filter(None,[s.get('address_1'),s.get('address_2'),s.get('address_3'),s.get('postcode')]))) or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Date Joined</span><br>{s.get('date_joined') or '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Hourly Rate</span><br>{'£'+str(s['hourly_rate'])+'/hr' if s.get('hourly_rate') else '—'}</div>
-        <div><span style='color:#94a3b8;font-weight:700'>Right to Work</span><br><a href='/staff/{staff_id}/documents' style='text-decoration:none'>{_rtw_status_summary(get_rtw_check(staff_id))}</a></div>
-      </div>
-    </div>
+    <!-- Personal details (owner only) -->
+    {personal_card}
     {(f"<div class='card' style='border-left:4px solid #dc2626'><div style='font-weight:900;color:#991b1b;margin-bottom:6px'>&#128682; Left" + (f" &middot; {s.get('date_left')}" if s.get('date_left') else "") + "</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('leaving_reason') or '—') + "</div></div>") if is_leaver else ''}
-    {(f"<div class='card' style='border-left:4px solid #f59e0b'><div style='font-weight:900;color:#92400e;margin-bottom:6px'>&#128221; Notes</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('notes')) + "</div></div>") if can_edit and s.get('notes') else ''}
+    {(f"<div class='card' style='border-left:4px solid #f59e0b'><div style='font-weight:900;color:#92400e;margin-bottom:6px'>&#128221; Notes</div><div style='font-size:13px;color:#334155;white-space:pre-wrap'>" + esc(s.get('notes')) + "</div></div>") if is_owner and s.get('notes') else ''}
     {login_card}
 
 
@@ -1503,15 +1517,11 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
 def edit_staff_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_owner(user)): return r   # managers don't edit staff records; staff use /my-profile
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows:
         return RedirectResponse("/staff", status_code=303)
     s = dict(rows[0])
-    # Staff can only edit their own profile (limited fields)
-    if user["role"] == "staff":
-        my_id = _own_staff_id(user)
-        if my_id != staff_id:
-            return RedirectResponse("/", status_code=303)
     return render_staff_form(user, s)
 
 
@@ -1687,7 +1697,7 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
 async def save_staff(staff_id: int, request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _require_owner(user)): return r   # only the owner edits staff records
     form = await request.form()
     fv = lambda k, d="": str(form.get(k, d) or d).strip()
     fn = lambda k: float(form.get(k, 0) or 0) if form.get(k) else None
@@ -1881,6 +1891,7 @@ def decline_leave(req_id: int, session: str | None = Cookie(default=None)):
 def pay_history_page(staff_id: int, session: str | None = Cookie(default=None), msg: str = ""):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_owner(user)): return r   # pay is owner-only
     if user["role"] not in ("owner", "manager"):
         return RedirectResponse("/staff", status_code=303)
 
@@ -2055,6 +2066,7 @@ def pay_history_page(staff_id: int, session: str | None = Cookie(default=None), 
 async def save_pay_change(staff_id: int, request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_owner(user)): return r   # pay is owner-only
     if user["role"] not in ("owner","manager"):
         return RedirectResponse(f"/staff/{staff_id}", status_code=303)
     form = await request.form()
@@ -2320,6 +2332,7 @@ def attendance_page(staff_id: int, session: str | None = Cookie(default=None),
 def set_entitlement_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
+    if (r := _require_owner(user)): return r   # entitlement overrides are owner-only
     if user["role"] not in ("owner","manager"):
         return RedirectResponse(f"/staff/{staff_id}", status_code=303)
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
@@ -2396,7 +2409,7 @@ async def save_entitlement(staff_id: int, request: Request,
                            session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _require_mgr(user)): return r
+    if (r := _require_owner(user)): return r   # entitlement overrides are owner-only
     form        = await request.form()
     year        = int(form.get("year", datetime.now().year))
     custom_days = float(form.get("custom_days", 0) or 0)
