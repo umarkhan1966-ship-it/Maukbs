@@ -65,10 +65,14 @@ def _gen_temp_password(length=10):
     return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
 
 
-def _staff_access_guard(user, staff_id):
+def _staff_access_guard(user, staff_id, allow_staff=True):
     """Staff-scoped routes: the owner may access anyone; a MANAGER only staff at
     their OWN store; a staff user only their own record. Bail (RedirectResponse)
-    otherwise, else None."""
+    otherwise, else None.
+
+    allow_staff=False marks areas that are NOT staff self-service (documents,
+    onboarding) — owner + own-store manager only; a staff user is turned away
+    even from their own record."""
     if user.get("role") == "owner":
         return None
     if user.get("role") == "manager":
@@ -76,6 +80,10 @@ def _staff_access_guard(user, staff_id):
         if row and row[0]["store_name"] and row[0]["store_name"] == user.get("store_name"):
             return None
         return RedirectResponse("/staff?msg=You+can+only+access+your+own+store&msg_type=error",
+                                status_code=303)
+    # staff role
+    if not allow_staff:
+        return RedirectResponse("/my-profile?msg=That+area+is+not+available+in+your+view&msg_type=error",
                                 status_code=303)
     if _own_staff_id(user) == staff_id:
         return None
@@ -2723,7 +2731,8 @@ def staff_documents(
 ):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    # Documents are not a staff self-service area — owner + own-store manager only.
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
 
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
@@ -3242,7 +3251,7 @@ def onboarding_overview(
 ):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
 
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
@@ -3352,7 +3361,7 @@ def onboarding_overview(
 def employment_application_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
 
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
@@ -3542,7 +3551,7 @@ async def save_employment_application(
 ):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
     import json
     form   = await request.form()
     action = form.get("action","save")
@@ -3575,7 +3584,7 @@ async def save_employment_application(
 def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
     s    = dict(rows[0])
@@ -3701,7 +3710,7 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
 async def save_p46(staff_id: int, request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
     import json
     form   = await request.form()
     action = form.get("action","save")
@@ -3869,7 +3878,7 @@ async def upload_paper_form(
 ):
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
 
     form      = await request.form()
     paper     = form.get("paper_form")
@@ -3918,7 +3927,7 @@ def onboarding_form_file(staff_id: int, form_type: str, session: str | None = Co
     (The checklist links here whenever a form has an uploaded file.)"""
     redir, user = require_login(session)
     if redir: return redir
-    if (r := _staff_access_guard(user, staff_id)): return r
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
     rows = q("SELECT pdf_path FROM onboarding_forms WHERE staff_id=? AND form_type=?",
              (staff_id, form_type), fetch=True)
     path = dict(rows[0])["pdf_path"] if rows else None
