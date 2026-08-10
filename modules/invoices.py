@@ -425,6 +425,16 @@ def fetch_invoices(ledger: str, search: str, status: str,
 
     balance_expr = "COALESCE(gross_amount,0)-COALESCE(amount_paid,0)-COALESCE(credit_note,0)"
 
+    # Totals across the WHOLE filtered set (not just this page), so the list can
+    # show a grand total even though results are paginated. balance nets off any
+    # part-payments and credit notes, so on the Overdue filter it is the real
+    # "amount left to pay".
+    _sum = q(f"""SELECT COALESCE(SUM({balance_expr}),0) AS bal,
+                        COALESCE(SUM(gross_amount),0)   AS gross,
+                        COALESCE(SUM(amount_paid),0)    AS paid
+                 FROM {table} {where}""", params, fetch=True)
+    totals = dict(_sum[0]) if _sum else {"bal": 0, "gross": 0, "paid": 0}
+
     # Build a safe ORDER BY from the whitelist. No sort given => newest first.
     col = SORT_COLUMNS.get(sort)
     direction_sql = "ASC" if str(direction).lower() == "asc" else "DESC"
@@ -441,7 +451,7 @@ def fetch_invoices(ledger: str, search: str, status: str,
     """, params + [page_size, (pg-1)*page_size], fetch=True) or []
 
     # Convert to dicts so .get() works safely throughout
-    return [dict(r) for r in rows], total_n
+    return [dict(r) for r in rows], total_n, totals
 
 
 @router.get("/invoices", response_class=HTMLResponse)
@@ -490,7 +500,7 @@ def invoices_page(
         if rows:
             edit_inv = dict(rows[0])
 
-    invoices, total_n = fetch_invoices(ledger, search, status, pg, PAGE_SIZE, sort, dir)
+    invoices, total_n, list_totals = fetch_invoices(ledger, search, status, pg, PAGE_SIZE, sort, dir)
     total_pages = max(1, (total_n + PAGE_SIZE - 1) // PAGE_SIZE)
 
     # Pending approvals count (managers/owners only)
@@ -1066,12 +1076,30 @@ def invoices_page(
     reset_link = (f"<a href='/invoices?ledger={urlquote(ledger)}#list' "
                   f"style='color:#fbbf24;font-size:12px;text-decoration:underline;margin-right:14px'>"
                   f"↺ Default view (newest first)</a>") if sort else ""
+
+    # Grand total for whatever's currently filtered (across ALL pages, not just
+    # the one on screen). On the Overdue/Unpaid filters this is the amount left to
+    # pay; on Paid it's the total paid; otherwise the outstanding balance.
+    _bal  = round(list_totals.get("bal", 0), 2)
+    _paid = round(list_totals.get("paid", 0), 2)
+    if status == "paid":
+        total_badge = f'&nbsp;·&nbsp;<span style="color:#86efac">Total paid £{_paid:,.2f}</span>'
+    elif status == "credits":
+        total_badge = f'&nbsp;·&nbsp;<span style="color:#86efac">Total credit available £{abs(_bal):,.2f}</span>'
+    elif status in ("overdue", "unpaid", "dd_reconcile", "partial"):
+        total_badge = f'&nbsp;·&nbsp;<span style="color:#86efac">Total to pay £{_bal:,.2f}</span>'
+    elif _bal:
+        total_badge = f'&nbsp;·&nbsp;<span style="color:#86efac">Total outstanding £{_bal:,.2f}</span>'
+    else:
+        total_badge = ""
+
     list_html = f"""
     <div class='card' id='list' style='padding:0;overflow:hidden'>
       <div style='padding:16px 20px;background:#0f2942;display:flex;justify-content:space-between;align-items:center'>
         <div style='color:white;font-weight:700;font-size:14px'>
           {total_n} invoices
           {'· <span style="color:#fbbf24">'+str(t.get('overdue_count',0))+' overdue</span>' if t.get('overdue_count',0) > 0 else ''}
+          {total_badge}
         </div>
         <div style='display:flex;align-items:center'>
           {reset_link}<span style='color:#93c5fd;font-size:12px'>Click a column title to sort · click any row to edit</span>
