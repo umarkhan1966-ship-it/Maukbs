@@ -428,6 +428,11 @@ def init_db():
         ("staff_id",      "staff_id INTEGER"),
         ("must_change_pw","must_change_pw INTEGER DEFAULT 0"),   # force password change on first login
     ])
+    ensure_columns("dd_statements", [
+        # A DD statement is now sent to the accountant ONCE, bundled with an invoice
+        # batch (stamped with that batch's sent date). NULL = not yet sent.
+        ("accountant_sent_date", "accountant_sent_date TEXT"),
+    ])
     ensure_columns("pay_history", [
         # Track more than just hourly rate, so a salary change / promotion /
         # hourly<->salary switch is captured in full (the original table only

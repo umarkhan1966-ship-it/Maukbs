@@ -3000,23 +3000,46 @@ def accountant_batch(session: str | None = Cookie(default=None),
         flash = (f"<div style='background:{bg};border:1px solid {colour};color:{colour};"
                  f"border-radius:10px;padding:12px 16px;margin-bottom:12px;font-weight:700'>{msg}</div>")
 
+    # ── DD collection statements to include in this batch ──
+    # The store's not-yet-sent statements, pre-ticked to the chosen date range
+    # (so an August batch pre-ticks August statements). Ticked ones are bundled
+    # into the batch PDF and marked sent when the batch is marked sent.
+    dd_pick_html = ""
+    if filtered and scope in ("Uxbridge", "Newbury", "ALL"):
+        dscope, dp = (("AND store_name=?", [scope]) if scope in ("Uxbridge", "Newbury") else ("", []))
+        dds = q(f"""SELECT dd_id, store_name, dd_date, orig_name FROM dd_statements
+                    WHERE accountant_sent_date IS NULL {dscope}
+                    ORDER BY store_name, dd_date""", dp, fetch=True) or []
+        if dds:
+            def _pretick(d):
+                if date_from and date_to: return date_from <= d <= date_to
+                if date_from: return d >= date_from
+                if date_to:   return d <= date_to
+                return True
+            items = ""
+            for r in dds:
+                ck = "checked" if _pretick(r["dd_date"]) else ""
+                items += (f"<label style='display:flex;gap:8px;align-items:center;padding:3px 0;font-size:13px'>"
+                          f"<input type='checkbox' name='dd_ids' value='{r['dd_id']}' {ck} class='ddchk'>"
+                          f"<span class='mono' style='color:#64748b;min-width:82px'>{fmt_uk_date(r['dd_date'])}</span>"
+                          f"<span style='font-weight:700;min-width:74px'>{html.escape(r['store_name'] or '')}</span>"
+                          f"<span style='color:#475569'>{html.escape(r['orig_name'] or 'statement')}</span></label>")
+            dd_pick_html = (
+                "<div class='card' style='margin-top:12px'>"
+                "<div style='font-weight:800;color:#0f2942'>🏦 DD collection statements to include</div>"
+                "<div style='font-size:12px;color:#64748b;margin:4px 0 8px'>These are bundled into this batch's PDF and "
+                "marked as sent, so each statement goes to the accountant once. Pre-ticked to your date range — tick/untick as needed.</div>"
+                + items + "</div>")
+
     today = datetime.now().strftime("%Y-%m-%d")
     if not filtered:
         table_and_form = ("<div class='card' style='margin-top:12px;color:#64748b'>"
                           "👆 Choose a <b>store / scope</b> above (and, if you like, a date range), then press "
                           "<b>🔍 Filter</b> to see what's not yet sent. Nothing is listed until you do — so "
                           "nothing can be marked as sent by accident.</div>")
-    elif rows:
-        table_and_form = f"""
-        <form method='POST' action='/invoices/accountant-batch/mark' onsubmit='return confirmSend();'>
-          <div class='card' style='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:12px'>
-            <div><label>Date sent to accountant</label>
-              <input type='date' name='sent_date' value='{today}' required></div>
-            <button type='submit' class='btn-primary'>
-              📨 Mark ticked invoices as sent
-            </button>
-            <span style='color:#64748b;font-size:13px'>{tot['n']} not yet sent · total £{tot['t']:,.2f}</span>
-          </div>
+    elif rows or dd_pick_html:
+        if rows:
+            invoice_block = f"""
           {nopdf_note}
           {capped}
           <div class='card' style='padding:0;overflow:hidden;margin-top:12px'>
@@ -3030,13 +3053,38 @@ def accountant_batch(session: str | None = Cookie(default=None),
                 <tbody>{tr}</tbody>
               </table>
             </div>
+          </div>"""
+        else:
+            invoice_block = ("<div class='card' style='margin-top:12px;color:#64748b'>"
+                             "No not-yet-sent invoices in this selection — you can still send the DD "
+                             "statements below with this date.</div>")
+        table_and_form = f"""
+        <form method='POST' action='/invoices/accountant-batch/mark' onsubmit='return confirmSend();'>
+          <div class='card' style='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:12px'>
+            <div><label>Date sent to accountant</label>
+              <input type='date' name='sent_date' value='{today}' required></div>
+            <button type='submit' class='btn-primary'>
+              📨 Mark ticked as sent
+            </button>
+            <span style='color:#64748b;font-size:13px'>{tot['n']} invoice(s) not yet sent · total £{tot['t']:,.2f}</span>
           </div>
+          {dd_pick_html}
+          {invoice_block}
         </form>
         <script>
-          document.getElementById('chkAll').addEventListener('change', function() {{
-            document.querySelectorAll('.rowchk').forEach(c => c.checked = this.checked);
-          }});
+          (function() {{
+            var ca = document.getElementById('chkAll');
+            if (ca) ca.addEventListener('change', function() {{
+              document.querySelectorAll('.rowchk').forEach(c => c.checked = this.checked);
+            }});
+          }})();
           function confirmSend() {{
+            var invs = document.querySelectorAll('.rowchk:checked').length;
+            var dds  = document.querySelectorAll('.ddchk:checked').length;
+            if (invs === 0 && dds === 0) {{
+              alert('Nothing ticked — tick at least one invoice or DD statement.');
+              return false;
+            }}
             var miss = 0;
             document.querySelectorAll('.rowchk:checked').forEach(function(c) {{
               if (c.getAttribute('data-doc') === 'missing') miss++;
@@ -3044,12 +3092,12 @@ def accountant_batch(session: str | None = Cookie(default=None),
             if (miss > 0) {{
               return confirm('\\u26A0 ' + miss + ' ticked invoice(s) have NO document attached (real invoices, not adjustments).\\n\\nSend anyway? You can Cancel, attach the scans, then come back.');
             }}
-            return confirm('Mark all ticked invoices as sent to the accountant?');
+            return confirm('Mark ' + invs + ' invoice(s) and ' + dds + ' DD statement(s) as sent to the accountant?');
           }}
         </script>"""
     else:
         table_and_form = ("<div class='card' style='margin-top:12px;color:#64748b'>"
-                          "No invoices match — nothing outstanding to send for this selection. ✅</div>")
+                          "Nothing outstanding to send for this selection. ✅</div>")
 
     content = f"""
     {flash}
@@ -3087,9 +3135,10 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
         if not sid.isdigit():
             continue
         (supplier_ids if src == "supplier" else property_ids).append(int(sid))
+    dd_ids = [int(x) for x in form.getlist("dd_ids") if str(x).isdigit()]
     from urllib.parse import quote as urlquote
-    if not sent_date or not (supplier_ids or property_ids):
-        return RedirectResponse("/invoices/accountant-batch?msg=Pick+a+date+and+at+least+one+invoice&msg_type=error",
+    if not sent_date or not (supplier_ids or property_ids or dd_ids):
+        return RedirectResponse("/invoices/accountant-batch?msg=Pick+a+date+and+at+least+one+invoice+or+DD+statement&msg_type=error",
                                 status_code=303)
 
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3100,8 +3149,17 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
             q(f"""UPDATE {tbl} SET accountant_sent_date=?, updated_by=?, updated_at=?
                   WHERE invoice_id IN ({ph})""",
               [sent_date, user_name, now_ts] + id_list)
+
+    # DD collection statements ticked to include in this batch — stamp them with
+    # the same sent date so they bundle into this batch's PDF (once).
+    if dd_ids:
+        ph = ",".join("?" * len(dd_ids))
+        q(f"UPDATE dd_statements SET accountant_sent_date=? WHERE dd_id IN ({ph})",
+          [sent_date] + dd_ids)
+
     n = len(supplier_ids) + len(property_ids)
-    msg = f"Marked {n} invoice(s) as sent to the accountant on {fmt_uk_date(sent_date)}."
+    dd_msg = f" and {len(dd_ids)} DD statement(s)" if dd_ids else ""
+    msg = f"Marked {n} invoice(s){dd_msg} as sent to the accountant on {fmt_uk_date(sent_date)}."
     return RedirectResponse(f"/invoices/accountant-batch?msg={urlquote(msg)}&msg_type=success",
                             status_code=303)
 
@@ -3340,8 +3398,19 @@ def accountant_unsend(sent_date: str = Form(""), store: str = Form(""),
         n += (cnt[0]["c"] if cnt else 0)
         q("UPDATE property_invoices SET accountant_sent_date=NULL, updated_by=?, updated_at=? WHERE accountant_sent_date=?",
           (who, now_ts, sent_date))
+    # Release any DD statements bundled with this batch (retail only) back to
+    # 'not yet sent', so they reappear on the ticklist.
+    dd_n = 0
+    if is_all or store in ("Uxbridge", "Newbury"):
+        dextra, dparams = (("AND store_name=?", [store]) if store in ("Uxbridge", "Newbury") else ("", []))
+        cnt = q(f"SELECT COUNT(*) c FROM dd_statements WHERE accountant_sent_date=? {dextra}",
+                [sent_date] + dparams, fetch=True)
+        dd_n += (cnt[0]["c"] if cnt else 0)
+        q(f"UPDATE dd_statements SET accountant_sent_date=NULL WHERE accountant_sent_date=? {dextra}",
+          [sent_date] + dparams)
+    dd_msg = f" and {dd_n} DD statement(s)" if dd_n else ""
     return RedirectResponse(
-        f"/invoices/accountant-sent?store={store}&msg={urlquote(f'Un-marked {n} invoice(s) — back to not-yet-sent.')}&msg_type=success",
+        f"/invoices/accountant-sent?store={store}&msg={urlquote(f'Un-marked {n} invoice(s){dd_msg} — back to not-yet-sent.')}&msg_type=success",
         status_code=303)
 
 
@@ -3377,25 +3446,21 @@ def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session
                     ) ORDER BY invoice_date, seq_no""", (sent_date, sent_date), fetch=True) or []
     paths = [r["pdf_path"] for r in rows if r["pdf_path"]]
 
-    # ── Bundle the relevant DD collection statements into the batch (retail only) ──
-    # These are the supporting documents for the DD-paid invoices AND for the DD
-    # reconciliation adjustment lines, so they travel WITH the batch instead of
-    # being emailed separately. Match on the (store, DD date) pairs that appear in
-    # this batch's supplier invoices. Appended AFTER the invoices.
+    # ── Bundle the DD collection statements that were SENT WITH this batch ──
+    # A DD statement is assigned to a batch (its accountant_sent_date = this batch's
+    # date) when the owner ticks it on the Send-to-Accountant screen, so each
+    # statement travels with exactly one batch — never duplicated, never missed.
+    # Retail only (Properties have no DD). Appended AFTER the invoices.
     dd_meta = []
     if loc != "Properties":
-        scope_sql, sp = (("AND store_name=?", [loc]) if loc in ("Uxbridge", "Newbury") else ("", []))
-        pairs = q(f"""SELECT DISTINCT store_name, dd_statement_date
-                      FROM supplier_invoices
-                      WHERE accountant_sent_date=? AND dd_statement_date IS NOT NULL
-                            AND dd_statement_date<>'' {scope_sql}""",
-                  [sent_date] + sp, fetch=True) or []
-        for pr in pairs:
-            for x in (q("SELECT file_path, orig_name FROM dd_statements WHERE store_name=? AND dd_date=?",
-                        (pr["store_name"], pr["dd_statement_date"]), fetch=True) or []):
-                if x["file_path"] and not any(m["file_path"] == x["file_path"] for m in dd_meta):
-                    dd_meta.append({"store": pr["store_name"], "dd_date": pr["dd_statement_date"],
-                                    "orig_name": x["orig_name"], "file_path": x["file_path"]})
+        dscope, dp = (("AND store_name=?", [loc]) if loc in ("Uxbridge", "Newbury") else ("", []))
+        for x in (q(f"""SELECT store_name, dd_date, file_path, orig_name
+                        FROM dd_statements
+                        WHERE accountant_sent_date=? {dscope}
+                        ORDER BY store_name, dd_date""", [sent_date] + dp, fetch=True) or []):
+            if x["file_path"]:
+                dd_meta.append({"store": x["store_name"], "dd_date": x["dd_date"],
+                                "orig_name": x["orig_name"], "file_path": x["file_path"]})
     dd_paths = [m["file_path"] for m in dd_meta]
     # Merge invoices first, then the DD statements.
     paths = paths + dd_paths
