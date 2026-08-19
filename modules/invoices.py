@@ -3293,8 +3293,11 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
         else:
             _dl = (f"<a href='/invoices/combined-pdf?sent_date={sent_date}&loc={_q(store)}' "
                    f"class='btn-primary dlbtn' style='font-size:12px'>⬇️ {store_label} PDF</a>")
-        _cmp = ("<label style='font-size:12px;color:#475569;display:flex;align-items:center;gap:4px'>"
-                "<input type='checkbox' id='cmp'> 🗜️ Smaller file (for email)</label>")
+        _cmp = ("<label title='Shrinks the file by rasterising the pages. Helps a lot with big, "
+                "scan-heavy batches; small text-based batches barely change and stay full quality "
+                "(the download only uses the smaller version if it actually wins).' "
+                "style='font-size:12px;color:#475569;display:flex;align-items:center;gap:4px;cursor:help'>"
+                "<input type='checkbox' id='cmp'> 🗜️ Compress for email (best for large scanned batches)</label>")
         _unsend_scope = "ALL invoices in this batch" if is_all else f"{store_label}'s invoices in this batch"
         _unsend = ("<form method='POST' action='/invoices/accountant-unsend' style='display:inline' "
                    f"onsubmit=\"return confirm('Un-mark {_unsend_scope} as sent? They go back to "
