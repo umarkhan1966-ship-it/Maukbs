@@ -2918,13 +2918,13 @@ def accountant_batch(session: str | None = Cookie(default=None),
         if scope in ("Uxbridge", "Newbury"):
             rc.append("store_name=?"); rp.append(scope)
         for r in (q(f"""SELECT invoice_id, seq_no, store_name loc, supplier_name,
-                               invoice_number, invoice_date, gross_amount
+                               invoice_number, invoice_date, gross_amount, pdf_path
                         FROM supplier_invoices WHERE {' AND '.join(rc)}{date_sql}""",
                     rp + date_params, fetch=True) or []):
             rows.append(("supplier", r))
     if filtered and want_prop:
         for r in (q(f"""SELECT invoice_id, seq_no, property_name loc, supplier_name,
-                               invoice_number, invoice_date, gross_amount
+                               invoice_number, invoice_date, gross_amount, pdf_path
                         FROM property_invoices
                         WHERE accountant_sent_date IS NULL
                           AND (awaiting_invoice IS NULL OR awaiting_invoice!='Yes'){date_sql}""",
@@ -2941,15 +2941,53 @@ def accountant_batch(session: str | None = Cookie(default=None),
         for v, lbl in [("", "— choose —"), ("Uxbridge", "Uxbridge"),
                        ("Newbury", "Newbury"), ("Property", "Properties"), ("ALL", "Everything")])
 
+    # Classify each row's document status:
+    #   ok      = a PDF is attached
+    #   adj     = no PDF, but it's a reconciliation adjustment (negative amount OR
+    #             no invoice number) — no document is EXPECTED
+    #   missing = no PDF on a real invoice (positive + has an invoice number)
+    #             => the one to warn about ("forgot to attach")
+    def _doc_status(r):
+        if r["pdf_path"]:
+            return "ok"
+        if (r["gross_amount"] or 0) < 0 or not str(r["invoice_number"] or "").strip():
+            return "adj"
+        return "missing"
+
+    _adj_list, _missing_list = [], []
     tr = ""
     for src, r in rows:
-        tr += (f"<tr><td><input type='checkbox' name='ids' value='{src}:{r['invoice_id']}' checked class='rowchk'></td>"
+        ds = _doc_status(r)
+        if ds == "ok":
+            doc_cell = "<span style='color:#16a34a' title='Document attached'>&#10003;</span>"
+        elif ds == "adj":
+            doc_cell = "<span style='color:#94a3b8' title='Reconciliation adjustment — no document expected'>&mdash;</span>"
+            _adj_list.append(f"#{r['seq_no']} {r['supplier_name']}")
+        else:
+            doc_cell = "<span style='color:#d97706;font-weight:900' title='No document attached'>&#9888;</span>"
+            _missing_list.append(f"#{r['seq_no']} {r['supplier_name']}")
+        tr += (f"<tr><td><input type='checkbox' name='ids' value='{src}:{r['invoice_id']}' checked class='rowchk' data-doc='{ds}'></td>"
                f"<td>{acct_serial_link(src == 'property', r['loc'], r['invoice_id'], r['seq_no'])}</td>"
+               f"<td style='text-align:center'>{doc_cell}</td>"
                f"<td style='font-size:12px'>{r['loc']}</td>"
                f"<td style='font-weight:700'>{r['supplier_name']}</td>"
                f"<td class='mono' style='font-size:12px'>{r['invoice_number'] or '—'}</td>"
                f"<td class='mono' style='font-size:12px;color:#64748b'>{fmt_uk_date(r['invoice_date'])}</td>"
                f"<td class='mono' style='text-align:right'>£{(r['gross_amount'] or 0):,.2f}</td></tr>")
+
+    # Header notes about entries with no PDF — real ones flagged, adjustments
+    # noted as expected (named by serial + supplier, no amounts).
+    nopdf_note = ""
+    if _missing_list:
+        nopdf_note += (f"<div style='background:#fffbeb;border:1px solid #f59e0b;color:#92400e;"
+                       f"border-radius:10px;padding:10px 14px;margin-top:12px;font-size:13px'>"
+                       f"&#9888; <b>{len(_missing_list)} invoice(s) have no document attached:</b> "
+                       f"{', '.join(_missing_list[:30])}. Attach the scan before sending, or leave unticked.</div>")
+    if _adj_list:
+        nopdf_note += (f"<div style='background:#f8fafc;border:1px solid #cbd5e1;color:#475569;"
+                       f"border-radius:10px;padding:10px 14px;margin-top:12px;font-size:13px'>"
+                       f"&#8505;&#65039; {len(_adj_list)} entr{'y' if len(_adj_list)==1 else 'ies'} with no PDF: "
+                       f"{', '.join(_adj_list[:30])} &mdash; reconciliation adjustments, none expected.</div>")
 
     capped = ("<div style='color:#b45309;font-size:12px;margin:6px 0'>Showing the first 500 — "
               "narrow with the filters above to see the rest.</div>") if total_n > 500 else ""
@@ -2970,23 +3008,23 @@ def accountant_batch(session: str | None = Cookie(default=None),
                           "nothing can be marked as sent by accident.</div>")
     elif rows:
         table_and_form = f"""
-        <form method='POST' action='/invoices/accountant-batch/mark'>
+        <form method='POST' action='/invoices/accountant-batch/mark' onsubmit='return confirmSend();'>
           <div class='card' style='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:12px'>
             <div><label>Date sent to accountant</label>
               <input type='date' name='sent_date' value='{today}' required></div>
-            <button type='submit' class='btn-primary'
-              onclick="return confirm('Mark all ticked invoices as sent to the accountant?');">
+            <button type='submit' class='btn-primary'>
               📨 Mark ticked invoices as sent
             </button>
             <span style='color:#64748b;font-size:13px'>{tot['n']} not yet sent · total £{tot['t']:,.2f}</span>
           </div>
+          {nopdf_note}
           {capped}
           <div class='card' style='padding:0;overflow:hidden;margin-top:12px'>
             <div style='overflow-x:auto'>
               <table class='tbl'>
                 <thead><tr>
                   <th><input type='checkbox' id='chkAll' checked title='Select all'></th>
-                  <th>Serial</th><th>Store/Property</th><th>Supplier</th><th>Invoice No.</th>
+                  <th>Serial</th><th title='Document attached?'>Doc</th><th>Store/Property</th><th>Supplier</th><th>Invoice No.</th>
                   <th>Inv. Date</th><th style='text-align:right'>Gross</th>
                 </tr></thead>
                 <tbody>{tr}</tbody>
@@ -2998,6 +3036,16 @@ def accountant_batch(session: str | None = Cookie(default=None),
           document.getElementById('chkAll').addEventListener('change', function() {{
             document.querySelectorAll('.rowchk').forEach(c => c.checked = this.checked);
           }});
+          function confirmSend() {{
+            var miss = 0;
+            document.querySelectorAll('.rowchk:checked').forEach(function(c) {{
+              if (c.getAttribute('data-doc') === 'missing') miss++;
+            }});
+            if (miss > 0) {{
+              return confirm('\\u26A0 ' + miss + ' ticked invoice(s) have NO document attached (real invoices, not adjustments).\\n\\nSend anyway? You can Cancel, attach the scans, then come back.');
+            }}
+            return confirm('Mark all ticked invoices as sent to the accountant?');
+          }}
         </script>"""
     else:
         table_and_form = ("<div class='card' style='margin-top:12px;color:#64748b'>"
@@ -3312,21 +3360,45 @@ def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session
 
     # This batch, scoped to the chosen company, in invoice-DATE order. Each store
     # is its own file; ALL properties combine into one "Properties" file.
+    _cols = "seq_no, supplier_name, invoice_number, invoice_date, gross_amount, pdf_path"
     if loc == "Properties":
-        rows = q("""SELECT invoice_date, pdf_path FROM property_invoices
+        rows = q(f"""SELECT {_cols} FROM property_invoices
                     WHERE accountant_sent_date=? ORDER BY invoice_date, seq_no""",
                  (sent_date,), fetch=True) or []
     elif loc:
-        rows = q("""SELECT invoice_date, pdf_path FROM supplier_invoices
+        rows = q(f"""SELECT {_cols} FROM supplier_invoices
                     WHERE accountant_sent_date=? AND store_name=? ORDER BY invoice_date, seq_no""",
                  (sent_date, loc), fetch=True) or []
     else:
-        rows = q("""SELECT invoice_date, pdf_path FROM (
-                      SELECT invoice_date, seq_no, pdf_path FROM supplier_invoices WHERE accountant_sent_date=?
+        rows = q(f"""SELECT {_cols} FROM (
+                      SELECT {_cols} FROM supplier_invoices WHERE accountant_sent_date=?
                       UNION ALL
-                      SELECT invoice_date, seq_no, pdf_path FROM property_invoices WHERE accountant_sent_date=?
+                      SELECT {_cols} FROM property_invoices WHERE accountant_sent_date=?
                     ) ORDER BY invoice_date, seq_no""", (sent_date, sent_date), fetch=True) or []
     paths = [r["pdf_path"] for r in rows if r["pdf_path"]]
+
+    # ── Bundle the relevant DD collection statements into the batch (retail only) ──
+    # These are the supporting documents for the DD-paid invoices AND for the DD
+    # reconciliation adjustment lines, so they travel WITH the batch instead of
+    # being emailed separately. Match on the (store, DD date) pairs that appear in
+    # this batch's supplier invoices. Appended AFTER the invoices.
+    dd_meta = []
+    if loc != "Properties":
+        scope_sql, sp = (("AND store_name=?", [loc]) if loc in ("Uxbridge", "Newbury") else ("", []))
+        pairs = q(f"""SELECT DISTINCT store_name, dd_statement_date
+                      FROM supplier_invoices
+                      WHERE accountant_sent_date=? AND dd_statement_date IS NOT NULL
+                            AND dd_statement_date<>'' {scope_sql}""",
+                  [sent_date] + sp, fetch=True) or []
+        for pr in pairs:
+            for x in (q("SELECT file_path, orig_name FROM dd_statements WHERE store_name=? AND dd_date=?",
+                        (pr["store_name"], pr["dd_statement_date"]), fetch=True) or []):
+                if x["file_path"] and not any(m["file_path"] == x["file_path"] for m in dd_meta):
+                    dd_meta.append({"store": pr["store_name"], "dd_date": pr["dd_statement_date"],
+                                    "orig_name": x["orig_name"], "file_path": x["file_path"]})
+    dd_paths = [m["file_path"] for m in dd_meta]
+    # Merge invoices first, then the DD statements.
+    paths = paths + dd_paths
 
     # Invoice-period label for the filename: a single month (Jun2026) or a range
     # (May2026-Jun2026) when the batch spans months (late "filed at start of…" ones).
@@ -3417,6 +3489,79 @@ def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session
                     data, sfx = cdata, "_compressed"
         except Exception:
             pass  # any failure → keep the clean lossless version
+
+    # ── Manifest / cover sheet (prepended as the first page) ──
+    # Lists every entry in the batch + the enclosed DD statements, and explains the
+    # document-less reconciliation adjustments, so the accountant gets a clear index.
+    manifest_bytes = b""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        loc_label = "Properties" if loc == "Properties" else (loc or "All stores")
+        styles = getSampleStyleSheet()
+        mbuf = io.BytesIO()
+        mdoc = SimpleDocTemplate(mbuf, pagesize=A4, topMargin=14*mm, bottomMargin=14*mm,
+                                 leftMargin=12*mm, rightMargin=12*mm, title=f"Accountant batch {loc_label} {sent_date}")
+        elems = [Paragraph("Invoices sent to accountant", styles["Title"]),
+                 Paragraph(f"{loc_label} &nbsp;&middot;&nbsp; sent {fmt_uk_date(sent_date)}", styles["Normal"]),
+                 Spacer(1, 5*mm)]
+        data_tbl = [["Serial", "Supplier", "Invoice No.", "Date", "Amount", "Document"]]
+        total = 0.0
+        for r in rows:
+            g = r["gross_amount"] or 0; total += g
+            if r["pdf_path"]:
+                doc_s = "attached"
+            elif g < 0 or not str(r["invoice_number"] or "").strip():
+                doc_s = "adjustment"
+            else:
+                doc_s = "NO DOCUMENT"
+            data_tbl.append([str(r["seq_no"] or ""), (r["supplier_name"] or "")[:34],
+                             (r["invoice_number"] or "—")[:18], fmt_uk_date(r["invoice_date"]),
+                             f"£{g:,.2f}", doc_s])
+        data_tbl.append(["", "", "", "", f"£{total:,.2f}", f"{len(rows)} item(s)"])
+        t = Table(data_tbl, repeatRows=1, colWidths=[15*mm, 55*mm, 30*mm, 22*mm, 24*mm, 26*mm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f2942")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+            ("ALIGN", (4, 0), (4, -1), "RIGHT"),
+            ("ALIGN", (0, 0), (0, -1), "RIGHT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f1f5f9")]),
+            ("LINEABOVE", (0, -1), (-1, -1), 0.6, colors.grey),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        elems.append(t)
+        if dd_meta:
+            elems.append(Spacer(1, 5*mm))
+            elems.append(Paragraph(f"<b>DD collection statements enclosed ({len(dd_meta)}):</b>", styles["Normal"]))
+            for m in dd_meta:
+                elems.append(Paragraph(f"&bull;&nbsp; {m['store']} &mdash; {fmt_uk_date(m['dd_date'])} &mdash; "
+                                       f"{m.get('orig_name') or 'statement'}", styles["Normal"]))
+        if any((not r["pdf_path"]) and ((r["gross_amount"] or 0) < 0 or not str(r["invoice_number"] or "").strip()) for r in rows):
+            elems.append(Spacer(1, 4*mm))
+            elems.append(Paragraph("<i>Entries marked &lsquo;adjustment&rsquo; are DD reconciliation lines with no "
+                                   "separate invoice document &mdash; their support is the enclosed DD statement.</i>",
+                                   styles["Normal"]))
+        mdoc.build(elems)
+        manifest_bytes = mbuf.getvalue()
+    except Exception:
+        manifest_bytes = b""
+
+    if manifest_bytes:
+        try:
+            fw = PdfWriter()
+            for pg in PdfReader(io.BytesIO(manifest_bytes)).pages:
+                fw.add_page(pg)
+            for pg in PdfReader(io.BytesIO(data)).pages:
+                fw.add_page(pg)
+            ob = io.BytesIO(); fw.write(ob); data = ob.getvalue()
+        except Exception:
+            pass
 
     _locpart = loc.replace(' ', '_').replace('/', '-') if loc else "Batch"
     _mpart = f"_{month_part}" if month_part else ""
