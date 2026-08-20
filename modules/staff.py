@@ -37,7 +37,7 @@ def _require_owner(user):
     """Bail (RedirectResponse) if the user isn't the owner, else None. Used for
     the sensitive areas managers must never reach (pay, edit, entitlement)."""
     if user.get("role") != "owner":
-        return RedirectResponse("/?msg=That+area+is+owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/?msg=That+area+is+not+available+in+your+view&msg_type=error", status_code=303)
     return None
 
 
@@ -834,7 +834,7 @@ def leave_requests(session: str | None = Cookie(default=None), msg: str = "", ms
         ltype = ABSENCE_TYPES.get(lr['leave_type'], lr['leave_type'])
         badge = {"approved":"<span class='badge-paid'>Approved</span>",
                  "pending": "<span class='badge-partial'>Pending manager</span>",
-                 "mgr_approved":"<span class='badge-partial' style='background:#e0e7ff;color:#3730a3'>Manager OK · awaiting owner</span>",
+                 "mgr_approved":"<span class='badge-partial' style='background:#e0e7ff;color:#3730a3'>Manager OK · awaiting the office</span>",
                  "declined":"<span class='badge-overdue'>Declined</span>"}.get(lr["status"],"")
         # action: "approve" shows Approve/Decline; "signoff" is the owner's final
         # sign-off wording; "none" is read-only.
@@ -896,9 +896,9 @@ def leave_requests(session: str | None = Cookie(default=None), msg: str = "", ms
             _table(f"⏳ Needs your approval ({len(needs)})", "#d97706",
                    "".join(req_row(lr, "approve") for lr in needs),
                    "No requests awaiting you") +
-            _table(f"🖊️ Awaiting owner sign-off ({len(upped)})", "#7c3aed",
+            _table(f"🖊️ Awaiting sign-off by the office ({len(upped)})", "#7c3aed",
                    "".join(req_row(lr, "none") for lr in upped),
-                   "Nothing awaiting the owner") +
+                   "Nothing awaiting the office") +
             _table("Recent Decisions", "#0f2942", recent_html, "No recent decisions"))
 
     flash = ""
@@ -1862,7 +1862,7 @@ def create_staff_login(staff_id: int, session: str | None = Cookie(default=None)
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] != "owner":
-        return RedirectResponse(f"/staff/{staff_id}?msg={uq('Only the owner can create staff logins')}&msg_type=error",
+        return RedirectResponse(f"/staff/{staff_id}?msg={uq('Only the office can create staff logins')}&msg_type=error",
                                 status_code=303)
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows:
@@ -1993,7 +1993,7 @@ async def submit_leave(staff_id: int, request: Request, session: str | None = Co
 
     from urllib.parse import quote as uq
     msg = {"approved": "Leave approved ✅",
-           "mgr_approved": "Recorded — awaiting owner sign-off ⏳",
+           "mgr_approved": "Recorded — awaiting sign-off by the office ⏳",
            "pending": "Leave request submitted — awaiting approval ⏳"}[status]
     return RedirectResponse(f"/staff/{staff_id}?msg={uq(msg)}", status_code=303)
 
@@ -2036,7 +2036,7 @@ def approve_leave(req_id: int, session: str | None = Cookie(default=None)):
             return RedirectResponse(f"/staff/leave-requests?msg={uq('Already actioned')}&msg_type=error", status_code=303)
         q("""UPDATE leave_requests SET status='mgr_approved', mgr_approved_by=?, mgr_approved_at=?
              WHERE request_id=?""", (user.get("username"), now, req_id))
-        msg = "Approved — sent to owner for sign-off ⏳"
+        msg = "Approved — sent to the office for sign-off ⏳"
     return RedirectResponse(f"/staff/leave-requests?msg={uq(msg)}", status_code=303)
 
 
@@ -3502,7 +3502,7 @@ def delete_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(de
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] != "owner":
-        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Only+the+owner+can+delete+documents&msg_type=error",
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Only+the+office+can+delete+documents&msg_type=error",
                                 status_code=303)
     rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=? AND deleted_at IS NULL",
              (doc_id, staff_id), fetch=True)
@@ -3534,7 +3534,7 @@ def restore_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(d
     if redir: return redir
     from urllib.parse import quote as uq
     if user["role"] != "owner":
-        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=? AND deleted_at IS NOT NULL",
              (doc_id, staff_id), fetch=True)
     if not rows:
@@ -3559,7 +3559,7 @@ def purge_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(def
     if redir: return redir
     from urllib.parse import quote as uq
     if user["role"] != "owner":
-        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=? AND deleted_at IS NOT NULL",
              (doc_id, staff_id), fetch=True)
     if not rows:   # never hard-delete something that isn't already in the bin
@@ -3582,7 +3582,7 @@ def documents_bin(staff_id: int, session: str | None = Cookie(default=None),
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] != "owner":
-        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
     if not rows: return RedirectResponse("/staff", status_code=303)
     s = dict(rows[0]); name = f"{s['first_name']} {s['last_name']}"
@@ -3694,7 +3694,7 @@ def _lock_banner_html(staff_id: int, form_type: str, state: dict, is_owner: bool
         unlock = ("" if not is_owner else
                   f"<form method='POST' action='/staff/{staff_id}/onboarding/{form_type}/unlock' style='display:inline'>"
                   f"<button class='btn-secondary' style='padding:5px 12px;font-size:12px'>&#128275; Unlock to edit</button></form>")
-        tail = "Unlock it to make changes." if is_owner else "Ask the owner to unlock it if it needs changing."
+        tail = "Unlock it to make changes." if is_owner else "Ask the office to unlock it if it needs changing."
         return (f"<div class='card' style='border-left:4px solid #16a34a;background:#f0fdf4;display:flex;"
                 f"justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap'>"
                 f"<div><div style='font-weight:900;color:#166534'>&#128274; Completed &amp; locked</div>"
@@ -4593,7 +4593,7 @@ def unlock_onboarding_form(staff_id: int, form_type: str, session: str | None = 
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] != "owner":
-        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     if form_type in DIGITAL_FORMS:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         q("""UPDATE onboarding_forms SET unlocked=1, unlocked_by=?, unlocked_at=?
