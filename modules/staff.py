@@ -2640,8 +2640,8 @@ def _doc_action_buttons(staff_id: int, d: dict, is_owner: bool, small: bool = Fa
              f"class='btn-secondary' style='padding:{pad};font-size:11px'>⬇️ Download</a>")
     if is_owner:
         btns += (f"<form method='POST' action='/staff/{staff_id}/documents/{d['doc_id']}/delete' "
-                 f"style='display:inline' onsubmit=\"return confirm('Delete v{d['version']} of "
-                 f"{d['doc_type']}? This cannot be undone.');\">"
+                 f"style='display:inline' onsubmit=\"return confirm('Move v{d['version']} of "
+                 f"{d['doc_type']} to the Recycle Bin? You can restore it from there.');\">"
                  f"<button type='submit' class='btn-danger' style='padding:{pad};font-size:11px'>🗑 Delete</button></form>")
     return btns
 
