@@ -1254,6 +1254,8 @@ def get_merge_fields(staff: dict) -> dict:
         "<<employer>>":                employer,
         "<<employer and store address>>": employer_addr,
         "<<store address>>":           store_addr,
+        "<<company trading name>>":    ent.get('trading_name') or ent.get('legal_name') or 'Snappy Snaps',
+        "<<company legal name>>":      ent.get('legal_name') or '',
         "<<s tore address >>":         store_addr,
         "<<store address line 1>>":    ent.get('addr_line1','') or '',
         "<<store address line 2>>":    ent.get('addr_line2','') or '',
@@ -4211,8 +4213,20 @@ def new_employee_notify_pdf(staff_id: int, session: str | None = Cookie(default=
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
                             leftMargin=14 * mm, rightMargin=14 * mm, title=f"New Employee Notification - {name}")
-    elems = [Paragraph("New Employee Notification", styles["Title"]),
-             Paragraph(html.escape(fv('employer_name') or ''), styles["Normal"]),
+    # Entity-aware letterhead (same as the Word docs): trading name + legal — address.
+    from reportlab.lib.enums import TA_CENTER
+    _ent = get_store_entity(s.get('store_name', ''))
+    _trading = _ent.get('trading_name') or _ent.get('legal_name') or 'Snappy Snaps'
+    _legal = _ent.get('legal_name') or ''
+    _addr = ', '.join(x for x in [_ent.get('addr_line1'), _ent.get('addr_line2'),
+                                  _ent.get('addr_line3'), _ent.get('addr_line4')] if x)
+    head_s = styles["Normal"].clone("head"); head_s.alignment = TA_CENTER; head_s.fontSize = 15; head_s.leading = 18
+    sub_s  = styles["Normal"].clone("sub");  sub_s.alignment = TA_CENTER;  sub_s.fontSize = 9
+    sub_s.textColor = colors.HexColor("#555555")
+    elems = [Paragraph(f"<b>{html.escape(_trading)}</b>", head_s),
+             Paragraph(html.escape(f"{_legal} – {_addr}" if _addr else _legal), sub_s),
+             Spacer(1, 4 * mm),
+             Paragraph("New Employee Notification", styles["Title"]),
              Paragraph("<i>For payroll setup. Employer-completed details are filled in; the payroll fields "
                        "are to be completed by the accountant.</i>", cell),
              Spacer(1, 5 * mm)]
