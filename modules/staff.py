@@ -4021,9 +4021,9 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
     else:
         wage_str = ''
     if s.get('is_salaried') == 'Y' and s.get('days_per_week'):
-        hol_str = f"{5.6 * s['days_per_week']:g} days"
+        hol_str = f"5.6 weeks ({5.6 * s['days_per_week']:g} days)"
     elif s.get('contracted_hrs'):
-        hol_str = f"{round(5.6 * s['contracted_hrs'], 1):g} hours"
+        hol_str = f"5.6 weeks ({round(5.6 * s['contracted_hrs'], 1):g} hours)"
     else:
         hol_str = ''
     def _sel(current, option):
