@@ -3005,14 +3005,43 @@ def generate_doc_form(
     templates = q("SELECT * FROM document_templates WHERE is_current=1 ORDER BY doc_type",
                   fetch=True) or []
 
-    # Show merge fields preview
-    fields     = get_merge_fields(s)
+    # Merge-fields preview — a CLEAN, plain-English, de-duplicated list. The full
+    # internal field set (both <<>> and {{}} syntaxes + legacy typo-variants) still
+    # drives the actual document fill; this panel is just the human-friendly view,
+    # one row per real field with its current value.
+    fields = get_merge_fields(s)
+    display_fields = [
+        ("Employee name",        "<<employee name>>"),
+        ("First name",           "<<employee first name>>"),
+        ("Address line 1",       "<<address line 1>>"),
+        ("Address line 2",       "<<address line 2>>"),
+        ("Address line 3",       "<<address line 3>>"),
+        ("Address line 4",       "<<address line 4>>"),
+        ("Postcode",             "<<post code>>"),
+        ("Date of birth",        "<<date of birth>>"),
+        ("Job title / position", "<<position>>"),
+        ("Employment type",      "<<FT or PT>>"),
+        ("Reports to",           "<<reporting to>>"),
+        ("Notice period",        "<<notice period>>"),
+        ("Contracted hours",     "<<contracted hours>>"),
+        ("Pay / wages",          "<<wages>>"),
+        ("Start date",           "<<date of joining>>"),
+        ("Employer",             "<<employer>>"),
+        ("Store address",        "<<store address>>"),
+        ("Store address line 1", "<<store address line 1>>"),
+        ("Store address line 2", "<<store address line 2>>"),
+        ("Store address line 3", "<<store address line 3>>"),
+        ("Store address line 4", "<<store address line 4>>"),
+        ("Today's date",         "<<today's date>>"),
+    ]
     fields_html = ""
-    for k, v in fields.items():
+    for label, key in display_fields:
+        v = fields.get(key, "")
+        val = esc(v) if v else "<span style='color:#cbd5e1'>(blank)</span>"
         fields_html += f"""
-        <div style='display:flex;gap:12px;padding:4px 0;border-bottom:1px solid #f1f5f9;font-size:12px'>
-          <code style='color:#7c3aed;min-width:180px'>{k}</code>
-          <span style='color:#334155'>{v or '—'}</span>
+        <div style='display:flex;gap:10px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:12px;align-items:baseline'>
+          <span style='min-width:140px;font-weight:700;color:#334155'>{esc(label)}</span>
+          <span style='color:#0f2942;flex:1'>{val}</span>
         </div>"""
 
     type_opts = ""
@@ -3046,9 +3075,10 @@ def generate_doc_form(
         {'<div class="flash-error" style="margin-top:12px">No templates uploaded yet. <a href=\'  /staff/document-templates\' style=\'color:#1e3a5f;font-weight:700\'>Upload templates here →</a></div>' if not templates else ''}
       </div>
       <div class='card'>
-        <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Available Merge Fields</div>
+        <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Details that will be filled in</div>
         <div style='font-size:11px;color:#64748b;margin-bottom:8px'>
-          Use these placeholders in your Word template — they will be replaced with this staff member's details.
+          What the document will use for {name}. Anything showing <b>(blank)</b> is missing from the staff record —
+          fill it on the record first, then generate.
         </div>
         <div style='max-height:400px;overflow-y:auto'>
           {fields_html}
