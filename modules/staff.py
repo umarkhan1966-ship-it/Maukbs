@@ -1336,10 +1336,12 @@ def fill_word_template(template_path: str, fields: dict) -> bytes:
         run.font.color.rgb = FILL_RGB
         run.font.bold = True
 
-    def replace_para_text(para):
+    def replace_para_text(para, style_values=True):
         """Replace merge fields, even where a field is split across several runs,
         and colour ONLY the filled-in value navy+bold (leaving all other text —
-        labels, body, the red signing 'X' — exactly as the template has it)."""
+        labels, body, the red signing 'X' — exactly as the template has it).
+        style_values=False keeps the run's own formatting (used for the letterhead
+        in the header, which carries its own navy sizing/weights)."""
         runs = para.runs
         if not runs:
             return
@@ -1387,17 +1389,27 @@ def fill_word_template(template_path: str, fields: dict) -> bytes:
                     runs[ri].text = ""
                 runs[end_run].text = after          # keeps the end run's own formatting
                 can_style = (before.strip() == "")
-            if can_style and val:
+            if can_style and val and style_values:
                 _style_value_run(runs[start_run])
 
-    for para in doc.paragraphs:
-        replace_para_text(para)
+    def _fill_container(container, style_values=True):
+        """Fill every paragraph + table cell inside a body / header / footer."""
+        for para in container.paragraphs:
+            replace_para_text(para, style_values)
+        for table in container.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        replace_para_text(para, style_values)
 
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    replace_para_text(para)
+    _fill_container(doc)
+    # Headers/footers hold the letterhead (logo + entity name + address), so the
+    # merge fields there must be filled too — but keep the letterhead's OWN navy
+    # sizing/weights (style_values=False), not the body's bold-every-value rule.
+    for section in doc.sections:
+        for hf in (section.header, section.first_page_header, section.even_page_header,
+                   section.footer, section.first_page_footer, section.even_page_footer):
+            _fill_container(hf, style_values=False)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -4213,19 +4225,34 @@ def new_employee_notify_pdf(staff_id: int, session: str | None = Cookie(default=
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
                             leftMargin=14 * mm, rightMargin=14 * mm, title=f"New Employee Notification - {name}")
-    # Entity-aware letterhead (same as the Word docs): trading name + legal — address.
-    from reportlab.lib.enums import TA_CENTER
+    # Entity-aware letterhead — same as the Word docs: logo LEFT, four navy lines
+    # beside it (trading name bold, legal name, then the two-line address), hairline under.
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import Image as RLImage
     _ent = get_store_entity(s.get('store_name', ''))
     _trading = _ent.get('trading_name') or _ent.get('legal_name') or 'Snappy Snaps'
     _legal = _ent.get('legal_name') or ''
-    _addr = ', '.join(x for x in [_ent.get('addr_line1'), _ent.get('addr_line2'),
-                                  _ent.get('addr_line3'), _ent.get('addr_line4')] if x)
-    head_s = styles["Normal"].clone("head"); head_s.alignment = TA_CENTER; head_s.fontSize = 15; head_s.leading = 18
-    sub_s  = styles["Normal"].clone("sub");  sub_s.alignment = TA_CENTER;  sub_s.fontSize = 9
-    sub_s.textColor = colors.HexColor("#555555")
-    elems = [Paragraph(f"<b>{html.escape(_trading)}</b>", head_s),
-             Paragraph(html.escape(f"{_legal} – {_addr}" if _addr else _legal), sub_s),
-             Spacer(1, 4 * mm),
+    _addr1 = ', '.join(x for x in [_ent.get('addr_line1'), _ent.get('addr_line2')] if x)
+    _addr2 = ', '.join(x for x in [_ent.get('addr_line3'), _ent.get('addr_line4')] if x)
+    NAVY = colors.HexColor("#1e3a5f")
+    name_s = styles["Normal"].clone("lh_name"); name_s.alignment = TA_LEFT
+    name_s.fontSize = 14; name_s.leading = 17; name_s.textColor = NAVY
+    line_s = styles["Normal"].clone("lh_line"); line_s.alignment = TA_LEFT
+    line_s.fontSize = 9; line_s.leading = 12; line_s.textColor = NAVY
+    _text_cell = [Paragraph(f"<b>{html.escape(_trading)}</b>", name_s),
+                  Paragraph(html.escape(_legal), line_s)]
+    if _addr1: _text_cell.append(Paragraph(html.escape(_addr1), line_s))
+    if _addr2: _text_cell.append(Paragraph(html.escape(_addr2), line_s))
+    _logo_path = os.path.join(TEMPLATES_DIR, "letterhead_logo.jpeg")
+    _logo = RLImage(_logo_path, width=38 * mm, height=18.6 * mm)
+    _head = Table([[_logo, _text_cell]], colWidths=[44 * mm, 138 * mm])
+    _head.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.75, NAVY)]))
+    elems = [_head,
+             Spacer(1, 5 * mm),
              Paragraph("New Employee Notification", styles["Title"]),
              Paragraph("<i>For payroll setup. Employer-completed details are filled in; the payroll fields "
                        "are to be completed by the accountant.</i>", cell),
