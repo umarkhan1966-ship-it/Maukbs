@@ -676,7 +676,7 @@ def invoices_page(
                 fi('dd_statement_date', 'DD Statement Date', 'date', inv.get('dd_statement_date',''), lock=lock_calc)
                 + cheque_field)
         staff_note = ("<div style='font-size:11px;color:#94a3b8;margin-bottom:6px'>"
-                      "🔒 Payment details are managed by the owner — shown here for information only.</div>"
+                      "🔒 Payment details are managed by the office — shown here for information only.</div>"
                       if lock_calc else "")
         payment_fields = f"""
         <div class='col-span-2' style='border-top:1px solid #e2e8f0;padding-top:12px;margin-top:4px'>
@@ -921,7 +921,7 @@ def invoices_page(
           {payment_fields}
         </div>
         <div class='flex gap-3 mt-4 items-center'>
-          {("<button type='submit' class='btn-primary'>" + ('💾 Update Invoice' if is_edit else '➕ Save Invoice') + "</button>") if (not is_edit or user.get('role') == 'owner') else "<span style='font-size:13px;color:#b45309;font-weight:700'>🔒 This invoice is already entered — only the owner can change it.</span>"}
+          {("<button type='submit' class='btn-primary'>" + ('💾 Update Invoice' if is_edit else '➕ Save Invoice') + "</button>") if (not is_edit or user.get('role') == 'owner') else "<span style='font-size:13px;color:#b45309;font-weight:700'>🔒 This invoice is already entered — only the office can change it.</span>"}
           {'<a href="/invoices/delete/' + str(edit_id) + '?ledger=' + ledger + '" class="btn-danger" onclick=\"return confirm(\'Delete this invoice?\');\">🗑️ Delete</a>' if (is_edit and user.get('role') == 'owner') else ''}
           <a href='{cancel_url}' class='btn-secondary'>Cancel</a>
           {"<label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;margin-left:8px'><input type='checkbox' name='save_pending' value='1' " + ('checked' if inv.get('approval_status')=='pending' else '') + "> Mark as pending (review later)</label>" if user.get('role') in ('owner','manager') else ''}
@@ -1528,7 +1528,7 @@ def invoices_page(
         attachments_html = f"""
         <div class='card' id='attachments' style='border-left:5px solid #0d9488;background:#f0fdfa;margin-top:12px'>
           <div style='font-weight:900;color:#0f766e;margin-bottom:4px'>📎 Supporting documents for this invoice</div>
-          <div style='font-size:11px;color:#475569;margin-bottom:10px'>Demand notes, supplier emails, or any extra files for this invoice — separate from the main invoice PDF above. Pick a file and it previews <b>side-by-side</b> so you can check it's the right one; click an attached PDF/image to view it side-by-side too. Give each a short <b>label</b>. Only the owner can remove.</div>
+          <div style='font-size:11px;color:#475569;margin-bottom:10px'>Demand notes, supplier emails, or any extra files for this invoice — separate from the main invoice PDF above. Pick a file and it previews <b>side-by-side</b> so you can check it's the right one; click an attached PDF/image to view it side-by-side too. Give each a short <b>label</b>. Only the office can remove.</div>
           {_alist}
           <form method='POST' action='/invoices/attachment/add' enctype='multipart/form-data' onsubmit='return checkDupAttach(this)' style='margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
             <input type='hidden' name='ledger' value='{_led}'>
@@ -1649,7 +1649,7 @@ async def save_invoice(
     if invoice_id and user.get("role") != "owner":
         return RedirectResponse(
             f"/invoices?ledger={urlquote(ledger)}&edit_id={invoice_id}"
-            f"&msg={urlquote('Only the owner can change an invoice once it has been entered')}&msg_type=error",
+            f"&msg={urlquote('Only the office can change an invoice once it has been entered')}&msg_type=error",
             status_code=303)
 
     def fv(key, default=""):
@@ -1777,7 +1777,7 @@ async def save_invoice(
         if not _known:
             return RedirectResponse(
                 f"/invoices?ledger={ledger}&msg="
-                + urlquote("Please pick a supplier from the list — new suppliers are added by the owner.")
+                + urlquote("Please pick a supplier from the list — new suppliers are added by the office.")
                 + "&msg_type=error", status_code=303)
 
     # ── Duplicate check (supplier + invoice_number + store, warn only) ──
@@ -1934,7 +1934,7 @@ def delete_invoice(
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] != "owner":
-        return RedirectResponse(f"/invoices?ledger={ledger}&msg=Only+the+owner+can+delete+invoices&msg_type=error",
+        return RedirectResponse(f"/invoices?ledger={ledger}&msg=Only+the+office+can+delete+invoices&msg_type=error",
                                 status_code=303)
     table = "property_invoices" if is_property_ledger(ledger) else "supplier_invoices"
     # Grab the attached PDF path before deleting the row, so we can also remove
@@ -1997,7 +1997,7 @@ def remove_pdf_page(invoice_id: int, ledger: str = Form("Uxbridge"),
                                 status_code=303)
 
     if user.get("role") not in ("owner", "manager"):
-        return _back("Only the owner or a manager can edit the PDF", err=True)
+        return _back("Only the office or a manager can edit the PDF", err=True)
     rows = q(f"SELECT pdf_path FROM {table} WHERE invoice_id=?", (invoice_id,), fetch=True)
     path = rows[0]["pdf_path"] if rows and rows[0]["pdf_path"] else None
     if not path or not os.path.exists(path) or not path.lower().endswith(".pdf"):
@@ -2118,7 +2118,7 @@ def attachment_delete(att_id: int, ledger: str = Form("Uxbridge"),
     from urllib.parse import quote as urlquote
     if user.get("role") not in ("owner", "manager"):
         return RedirectResponse(
-            f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg=Only+the+owner+can+remove+documents&msg_type=error#attachments",
+            f"/invoices?ledger={ledger}&edit_id={invoice_id}&msg=Only+the+office+can+remove+documents&msg_type=error#attachments",
             status_code=303)
     rows = q("SELECT file_path FROM invoice_attachments WHERE att_id=?", (att_id,), fetch=True)
     q("DELETE FROM invoice_attachments WHERE att_id=?", (att_id,))
@@ -2301,7 +2301,7 @@ def dd_collection(session: str | None = Cookie(default=None),
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=DD+Collection+Check+is+owner-only&msg_type=error",
+        return RedirectResponse("/invoices?msg=DD+Collection+Check+is+not+available+in+your+view&msg_type=error",
                                 status_code=303)
     STORES = ["Uxbridge", "Newbury"]
     if store not in STORES:
@@ -2670,7 +2670,7 @@ async def dd_collection_mark_paid(request: Request, session: str | None = Cookie
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
 
     form      = await request.form()
     store     = (form.get("store") or "").strip()
@@ -2747,7 +2747,7 @@ async def dd_add_credit(request: Request, session: str | None = Cookie(default=N
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices/dd-collection?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     form     = await request.form()
     store    = (form.get("store") or "").strip()
     dd_date  = (form.get("dd_date") or "").strip()
@@ -2780,7 +2780,7 @@ async def dd_attach(request: Request, session: str | None = Cookie(default=None)
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices/dd-collection?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     form    = await request.form()
     store   = (form.get("store") or "").strip()
     dd_date = (form.get("dd_date") or "").strip()
@@ -2803,7 +2803,7 @@ def dd_statement_serve(dd_id: int, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return HTMLResponse("<p>Owner only</p>", status_code=403)
+        return HTMLResponse("<p>Not available in your view</p>", status_code=403)
     rows = q("SELECT file_path FROM dd_statements WHERE dd_id=?", (dd_id,), fetch=True)
     if not rows or not rows[0]["file_path"] or not os.path.exists(rows[0]["file_path"]):
         return HTMLResponse("<p>Statement not found</p>", status_code=404)
@@ -2821,7 +2821,7 @@ async def dd_statement_delete(dd_id: int, request: Request, session: str | None 
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices/dd-collection?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     form    = await request.form()
     store   = (form.get("store") or "").strip()
     dd_date = (form.get("dd_date") or "").strip()
@@ -2846,7 +2846,7 @@ async def dd_untag(request: Request, session: str | None = Cookie(default=None))
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices/dd-collection?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     form    = await request.form()
     store   = (form.get("store") or "").strip()
     dd_date = (form.get("dd_date") or "").strip()
@@ -2868,7 +2868,7 @@ async def dd_tag(request: Request, session: str | None = Cookie(default=None)):
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices/dd-collection?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices/dd-collection?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     form    = await request.form()
     store   = (form.get("store") or "").strip()
     dd_date = (form.get("dd_date") or "").strip()
@@ -2896,7 +2896,7 @@ def accountant_batch(session: str | None = Cookie(default=None),
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Send+to+Accountant+is+owner-only&msg_type=error",
+        return RedirectResponse("/invoices?msg=Send+to+Accountant+is+not+available+in+your+view&msg_type=error",
                                 status_code=303)
 
     # Only build the list once the owner has DELIBERATELY chosen a scope and hit
@@ -3123,7 +3123,7 @@ async def accountant_batch_mark(request: Request, session: str | None = Cookie(d
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
 
     form = await request.form()
     sent_date = (form.get("sent_date") or "").strip()
@@ -3174,7 +3174,7 @@ def accountant_sent(session: str | None = Cookie(default=None), sent_date: str =
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
 
     # Default to the store the owner was last working in (so Send-to-Accountant
     # from Newbury lands on Newbury's history), falling back to Uxbridge.
@@ -3379,7 +3379,7 @@ def accountant_unsend(sent_date: str = Form(""), store: str = Form(""),
     if redir: return redir
     from urllib.parse import quote as urlquote
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     if not sent_date:
         return RedirectResponse("/invoices/accountant-sent", status_code=303)
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3426,7 +3426,7 @@ def combined_pdf(sent_date: str = "", loc: str = "", compress: str = "", session
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
     if not sent_date:
         return HTMLResponse("<p>No batch date given.</p>", status_code=400)
 
@@ -3648,7 +3648,7 @@ def reports(session: str | None = Cookie(default=None),
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Reports+is+owner-only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Reports+is+not+available+in+your+view&msg_type=error", status_code=303)
 
     REPORTS = [("supplier", "Supplier statement"), ("overdue", "Overdue / due window"),
                ("upcoming", "Upcoming dues"), ("period", "Period / quarterly"),
@@ -3954,7 +3954,7 @@ def property_reports(session: str | None = Cookie(default=None),
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Reports+is+owner-only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Reports+is+not+available+in+your+view&msg_type=error", status_code=303)
 
     REPORTS = [("all", "All properties (list)"), ("overdue", "Overdue / unpaid"),
                ("spend", "Spend per property"), ("supplier", "Spend per supplier")]
@@ -4205,7 +4205,7 @@ def supplier_terms(session: str | None = Cookie(default=None), msg: str = "", ms
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Supplier+terms+is+owner-only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Supplier+terms+is+not+available+in+your+view&msg_type=error", status_code=303)
 
     rows = q("""
         SELECT s.supplier_name sn, s.n cnt, t.term_type tt, t.term_value tv, t.pays_dd dd, t.vat_reclaim_pct vp
@@ -4341,7 +4341,7 @@ async def supplier_terms_save(request: Request, session: str | None = Cookie(def
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
 
     form = await request.form()
     conn = db(); cur = conn.cursor()
@@ -4401,7 +4401,7 @@ async def supplier_rename(request: Request, session: str | None = Cookie(default
     redir, user = require_login(session)
     if redir: return redir
     if user.get("role") != "owner":
-        return RedirectResponse("/invoices?msg=Owner+only&msg_type=error", status_code=303)
+        return RedirectResponse("/invoices?msg=Not+available+in+your+view&msg_type=error", status_code=303)
 
     form = await request.form()
     old = (form.get("old_name") or "").strip()
