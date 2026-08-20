@@ -3287,6 +3287,15 @@ def ensure_onboarding_tables():
             FOREIGN KEY (staff_id) REFERENCES staff_profiles(staff_id)
         )
     """)
+    # ── Migration: lock-on-submit governance (a completed form is read-only until
+    # the owner explicitly unlocks it) + a light audit trail ──
+    _ob_cols = {r[1] for r in c.execute("PRAGMA table_info(onboarding_forms)")}
+    for _n, _ddl in [("unlocked", "unlocked INTEGER DEFAULT 0"),
+                     ("submitted_by", "submitted_by TEXT"),
+                     ("unlocked_by", "unlocked_by TEXT"),
+                     ("unlocked_at", "unlocked_at TEXT")]:
+        if _n not in _ob_cols:
+            c.execute(f"ALTER TABLE onboarding_forms ADD COLUMN {_ddl}")
     conn.commit()
     conn.close()
 
@@ -3302,6 +3311,66 @@ ONBOARD_FORMS = [
 
 
 DIGITAL_FORMS = {"employment_application", "p46", "new_employee_notify"}
+
+
+def _onboarding_lock_state(staff_id: int, form_type: str) -> dict:
+    """Lock state of a digital onboarding form. A COMPLETED form is LOCKED
+    (read-only) until the owner explicitly unlocks it."""
+    r = q("""SELECT status, unlocked, submitted_by, completed_at, unlocked_by, unlocked_at
+             FROM onboarding_forms WHERE staff_id=? AND form_type=?""",
+          (staff_id, form_type), fetch=True)
+    d = dict(r[0]) if r else {}
+    completed = d.get("status") == "completed"
+    d["completed"] = completed
+    d["locked"] = completed and not d.get("unlocked")
+    return d
+
+
+def _lock_banner_html(staff_id: int, form_type: str, state: dict, is_owner: bool) -> str:
+    """Banner shown above a completed onboarding form (locked or temporarily
+    unlocked), with the audit trail and — for the owner — an Unlock button."""
+    if not state.get("completed"):
+        return ""
+    bits = []
+    if state.get("submitted_by") or state.get("completed_at"):
+        bits.append("Submitted by " + esc(state.get("submitted_by") or "—")
+                    + (f" on {esc(state['completed_at'])}" if state.get("completed_at") else ""))
+    if state.get("unlocked_by"):
+        bits.append("unlocked by " + esc(state["unlocked_by"])
+                    + (f" on {esc(state['unlocked_at'])}" if state.get("unlocked_at") else ""))
+    audit = " · ".join(bits)
+    if state.get("locked"):
+        unlock = ("" if not is_owner else
+                  f"<form method='POST' action='/staff/{staff_id}/onboarding/{form_type}/unlock' style='display:inline'>"
+                  f"<button class='btn-secondary' style='padding:5px 12px;font-size:12px'>&#128275; Unlock to edit</button></form>")
+        tail = "Unlock it to make changes." if is_owner else "Ask the owner to unlock it if it needs changing."
+        return (f"<div class='card' style='border-left:4px solid #16a34a;background:#f0fdf4;display:flex;"
+                f"justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap'>"
+                f"<div><div style='font-weight:900;color:#166534'>&#128274; Completed &amp; locked</div>"
+                f"<div style='font-size:12px;color:#475569'>{audit}{'. ' if audit else ''}This form is read-only. {tail}</div></div>"
+                f"{unlock}</div>")
+    return (f"<div class='card' style='border-left:4px solid #f59e0b;background:#fffbeb'>"
+            f"<div style='font-weight:900;color:#92400e'>&#128275; Unlocked for editing</div>"
+            f"<div style='font-size:12px;color:#475569'>{audit}{'. ' if audit else ''}Saving again will re-lock it.</div></div>")
+
+
+# Appended to a locked form's page: disables the onboarding form's fields and
+# hides its Save/Submit buttons (the server ALSO refuses saves to a locked form,
+# so this is just the read-only look). Scoped to id='obform' so the Unlock button
+# in the banner is untouched.
+_LOCK_SCRIPT = """
+<script>(function(){
+  var f=document.getElementById('obform'); if(!f) return;
+  f.querySelectorAll('input,select,textarea').forEach(function(el){el.setAttribute('disabled','');});
+  f.querySelectorAll('button').forEach(function(b){b.style.display='none';});
+  f.style.opacity='0.85';
+})();</script>"""
+
+
+def _onboarding_save_locked(staff_id: int, form_type: str) -> bool:
+    """True if this form is completed and NOT unlocked — a save must be refused
+    (server-side enforcement of the lock, independent of the read-only UI)."""
+    return _onboarding_lock_state(staff_id, form_type).get("locked", False)
 
 
 def get_onboarding_status(staff_id: int) -> dict:
@@ -3494,7 +3563,7 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
       <div style='font-size:13px;color:#64748b;margin-top:2px'>Snappy Snaps — Equal Opportunity Employer</div>
     </div>
 
-    <form action='/staff/{staff_id}/onboarding/employment_application' method='POST' class='space-y-6'>
+    <form id='obform' action='/staff/{staff_id}/onboarding/employment_application' method='POST' class='space-y-6'>
 
       <div class='card'>
         <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Position & Personal Details</div>
@@ -3644,6 +3713,8 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
       </div>
     </form>"""
 
+    _st = _onboarding_lock_state(staff_id, "employment_application")
+    content = _lock_banner_html(staff_id, "employment_application", _st, user["role"] == "owner") + content + (_LOCK_SCRIPT if _st["locked"] else "")
     return page("Employment Application", content, user, "staff")
 
 
@@ -3656,6 +3727,9 @@ async def save_employment_application(
     redir, user = require_login(session)
     if redir: return redir
     if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
+    from urllib.parse import quote as uq
+    if _onboarding_save_locked(staff_id, "employment_application"):
+        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('That form is completed and locked — unlock it first to make changes')}&msg_type=error", status_code=303)
     import json
     form   = await request.form()
     action = form.get("action","save")
@@ -3663,14 +3737,16 @@ async def save_employment_application(
     status = "completed" if action == "complete" else "in_progress"
     now    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    q("""INSERT INTO onboarding_forms (staff_id, form_type, status, started_at, completed_at, form_data)
-         VALUES(?,?,?,?,?,?)
+    q("""INSERT INTO onboarding_forms (staff_id, form_type, status, started_at, completed_at, form_data, submitted_by, unlocked)
+         VALUES(?,?,?,?,?,?,?,0)
          ON CONFLICT(staff_id,form_type) DO UPDATE SET
             status=excluded.status,
             completed_at=excluded.completed_at,
-            form_data=excluded.form_data""",
+            form_data=excluded.form_data,
+            submitted_by=CASE WHEN excluded.status='completed' THEN excluded.submitted_by ELSE onboarding_forms.submitted_by END,
+            unlocked=0""",
       (staff_id, "employment_application", status, now, now if status=="completed" else None,
-       json.dumps(data)))
+       json.dumps(data), user.get("username","") if status=="completed" else None))
 
     # Update staff profile with key fields
     q("""UPDATE staff_profiles SET phone=?, address_1=?
@@ -3707,7 +3783,7 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
       <div class='text-2xl font-black text-slate-800 mt-1'>P46 — Employee without a P45</div>
       <div style='font-size:13px;color:#64748b;margin-top:2px'>Section one — to be completed by the employee</div>
     </div>
-    <form action='/staff/{staff_id}/onboarding/p46' method='POST' class='space-y-6'>
+    <form id='obform' action='/staff/{staff_id}/onboarding/p46' method='POST' class='space-y-6'>
       <div class='card'>
         <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Your Details</div>
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(220px,1fr))'>
@@ -3807,6 +3883,8 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
       </div>
     </form>"""
 
+    _st = _onboarding_lock_state(staff_id, "p46")
+    content = _lock_banner_html(staff_id, "p46", _st, user["role"] == "owner") + content + (_LOCK_SCRIPT if _st["locked"] else "")
     return page("P46", content, user, "staff")
 
 
@@ -3815,17 +3893,23 @@ async def save_p46(staff_id: int, request: Request, session: str | None = Cookie
     redir, user = require_login(session)
     if redir: return redir
     if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
+    from urllib.parse import quote as uq
+    if _onboarding_save_locked(staff_id, "p46"):
+        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('That form is completed and locked — unlock it first to make changes')}&msg_type=error", status_code=303)
     import json
     form   = await request.form()
     action = form.get("action","save")
     data   = {k: str(v) for k, v in form.items() if k != "action"}
     status = "completed" if action == "complete" else "in_progress"
     now    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    q("""INSERT INTO onboarding_forms (staff_id,form_type,status,started_at,completed_at,form_data)
-         VALUES(?,?,?,?,?,?)
+    q("""INSERT INTO onboarding_forms (staff_id,form_type,status,started_at,completed_at,form_data,submitted_by,unlocked)
+         VALUES(?,?,?,?,?,?,?,0)
          ON CONFLICT(staff_id,form_type) DO UPDATE SET
-            status=excluded.status, completed_at=excluded.completed_at, form_data=excluded.form_data""",
-      (staff_id,"p46",status,now,now if status=="completed" else None, json.dumps(data)))
+            status=excluded.status, completed_at=excluded.completed_at, form_data=excluded.form_data,
+            submitted_by=CASE WHEN excluded.status='completed' THEN excluded.submitted_by ELSE onboarding_forms.submitted_by END,
+            unlocked=0""",
+      (staff_id,"p46",status,now,now if status=="completed" else None, json.dumps(data),
+       user.get("username","") if status=="completed" else None))
     # Update DOB on profile
     if data.get("dob"):
         q("UPDATE staff_profiles SET date_of_birth=? WHERE staff_id=?", (data["dob"], staff_id))
@@ -3862,7 +3946,7 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
       <div class='text-2xl font-black text-slate-800 mt-1'>New Employee Notification — {esc(name)}</div>
       <div style='font-size:12px;color:#94a3b8;margin-top:2px'>Owner only — not visible to staff</div>
     </div>
-    <form action='/staff/{staff_id}/onboarding/new_employee_notify' method='POST' class='space-y-6'>
+    <form id='obform' action='/staff/{staff_id}/onboarding/new_employee_notify' method='POST' class='space-y-6'>
       <div class='card'>
         <div style='font-weight:900;color:#0f2942;margin-bottom:12px'>Employee Details</div>
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(220px,1fr))'>
@@ -3948,6 +4032,8 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
       </div>
     </form>"""
 
+    _st = _onboarding_lock_state(staff_id, "new_employee_notify")
+    content = _lock_banner_html(staff_id, "new_employee_notify", _st, user["role"] == "owner") + content + (_LOCK_SCRIPT if _st["locked"] else "")
     return page("New Employee Notification", content, user, "staff")
 
 
@@ -3958,19 +4044,40 @@ async def save_new_employee_notify(
     redir, user = require_login(session)
     if redir: return redir
     if (r := _require_mgr(user)): return r
+    from urllib.parse import quote as uq
+    if _onboarding_save_locked(staff_id, "new_employee_notify"):
+        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('That form is completed and locked — unlock it first to make changes')}&msg_type=error", status_code=303)
     import json
     form   = await request.form()
     action = form.get("action","save")
     data   = {k: str(v) for k, v in form.items() if k != "action"}
     status = "completed" if action == "complete" else "in_progress"
     now    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    q("""INSERT INTO onboarding_forms (staff_id,form_type,status,started_at,completed_at,form_data)
-         VALUES(?,?,?,?,?,?)
+    q("""INSERT INTO onboarding_forms (staff_id,form_type,status,started_at,completed_at,form_data,submitted_by,unlocked)
+         VALUES(?,?,?,?,?,?,?,0)
          ON CONFLICT(staff_id,form_type) DO UPDATE SET
-            status=excluded.status, completed_at=excluded.completed_at, form_data=excluded.form_data""",
-      (staff_id,"new_employee_notify",status,now,now if status=="completed" else None,json.dumps(data)))
-    from urllib.parse import quote as uq
+            status=excluded.status, completed_at=excluded.completed_at, form_data=excluded.form_data,
+            submitted_by=CASE WHEN excluded.status='completed' THEN excluded.submitted_by ELSE onboarding_forms.submitted_by END,
+            unlocked=0""",
+      (staff_id,"new_employee_notify",status,now,now if status=="completed" else None,json.dumps(data),
+       user.get("username","") if status=="completed" else None))
     return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('Notification saved')}", status_code=303)
+
+
+@router.post("/staff/{staff_id}/onboarding/{form_type}/unlock")
+def unlock_onboarding_form(staff_id: int, form_type: str, session: str | None = Cookie(default=None)):
+    """Owner-only: unlock a completed onboarding form so it can be edited again.
+    Saving it re-locks it. Records who unlocked it and when (audit)."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}/onboarding?msg=Owner+only&msg_type=error", status_code=303)
+    if form_type in DIGITAL_FORMS:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        q("""UPDATE onboarding_forms SET unlocked=1, unlocked_by=?, unlocked_at=?
+             WHERE staff_id=? AND form_type=? AND status='completed'""",
+          (user.get("username", ""), now, staff_id, form_type))
+    return RedirectResponse(f"/staff/{staff_id}/onboarding/{form_type}", status_code=303)
 
 
 @router.post("/staff/{staff_id}/onboarding/{form_type}/upload-paper")
