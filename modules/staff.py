@@ -361,6 +361,30 @@ def ensure_staff_tables():
             FOREIGN KEY (staff_id) REFERENCES staff_profiles(staff_id)
         )
     """)
+    # ── Issued Items register: things HANDED to a staff member that may need
+    # returning — store keys, uniform, fobs, badges, equipment. Each issue can
+    # carry a SOFT e-signature (the person ticks + types their name, captured with
+    # a timestamp — no printing/scanning). status Issued -> Returned/Replaced/Lost;
+    # anything still 'Issued' is what they must hand back when they leave.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS staff_issued_items (
+            item_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_id      INTEGER NOT NULL,
+            item_type     TEXT NOT NULL,          -- Key / Uniform / Fob / Badge / Equipment / Other
+            details       TEXT,                   -- e.g. 'Front door key', 'Polo shirt x2'
+            qty           INTEGER DEFAULT 1,
+            date_issued   TEXT,                   -- YYYY-MM-DD
+            issued_by     TEXT,                   -- login who recorded the issue
+            signed_name   TEXT,                   -- soft e-sign: typed name of the receiver
+            signed_at     TEXT,                   -- soft e-sign: timestamp of acceptance
+            status        TEXT DEFAULT 'Issued',  -- Issued / Returned / Replaced / Lost
+            date_returned TEXT,                   -- when returned / closed
+            returned_note TEXT,                   -- condition / replacement ref
+            closed_by     TEXT,                   -- who recorded the return/close
+            created_at    TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (staff_id) REFERENCES staff_profiles(staff_id)
+        )
+    """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS nmw_rates (
             nmw_id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1445,6 +1469,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
     # Leave figure for the cards comes from ATTENDANCE (same helper as the
     # Attendance page), so the profile and Attendance page always agree.
     att_leave = attendance_leave(staff_id, year)
+    issued_out = issued_items_outstanding(staff_id)   # keys/uniform still held
 
     # Staff-login status card — owner only.
     login_card = ""
@@ -1535,6 +1560,7 @@ def staff_profile(staff_id: int, session: str | None = Cookie(default=None)):
         {'<a href="/staff/' + str(staff_id) + '/set-entitlement" class="btn-secondary">⚙️ Set Entitlement</a>' if is_owner else ''}
         <a href='/staff/{staff_id}/documents' class='btn-secondary'>&#128193; Documents</a>
         {'<a href="/staff/' + str(staff_id) + '/attendance" class="btn-secondary">🕒 Attendance</a>' if can_edit else ''}
+        {'<a href="/staff/' + str(staff_id) + '/issued-items" class="btn-secondary">🔑 Issued Items' + (" <span style=\'background:#dc2626;color:#fff;font-size:11px;font-weight:800;padding:1px 7px;border-radius:999px;margin-left:2px\'>" + str(issued_out) + "</span>" if issued_out else "") + '</a>' if can_edit else ''}
         {'<a href="/staff/' + str(staff_id) + '/onboarding" class="btn-secondary">&#128203; Onboarding</a>' if is_owner else ''}
       </div>
     </div>
@@ -2632,6 +2658,260 @@ async def save_entitlement(staff_id: int, request: Request,
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff/{staff_id}?msg={uq('Entitlement updated')}",
                             status_code=303)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ISSUED ITEMS — keys / uniform / fobs / badges / equipment handed to a person.
+#  Owner + own-store manager only. A soft e-signature (tick + typed name, stamped
+#  with a time) records that the person accepted the item — no printing/scanning.
+#  Anything still 'Issued' is what they must hand back when they leave.
+# ─────────────────────────────────────────────────────────────────────────────
+ISSUED_ITEM_TYPES = ["Key", "Uniform", "Fob", "Badge", "Equipment", "Other"]
+_IST = "padding:6px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"
+
+
+def _issued_status_badge(status: str) -> str:
+    bg, fg = {"Issued": ("#fef3c7", "#92400e"), "Returned": ("#dcfce7", "#166534"),
+              "Replaced": ("#dbeafe", "#1d4ed8"), "Lost": ("#fee2e2", "#991b1b")
+              }.get(status, ("#f1f5f9", "#64748b"))
+    return (f"<span style='background:{bg};color:{fg};font-size:11px;font-weight:700;"
+            f"padding:2px 8px;border-radius:999px'>{esc(status)}</span>")
+
+
+def issued_items_outstanding(staff_id: int) -> int:
+    """How many items the person still holds (status still 'Issued')."""
+    r = q("SELECT COUNT(*) AS n FROM staff_issued_items WHERE staff_id=? AND status='Issued'",
+          (staff_id,), fetch=True)
+    return dict(r[0])["n"] if r else 0
+
+
+@router.get("/staff/{staff_id}/issued-items", response_class=HTMLResponse)
+def issued_items(staff_id: int, session: str | None = Cookie(default=None),
+                 msg: str = "", msg_type: str = "success"):
+    redir, user = require_login(session)
+    if redir: return redir
+    # Owner + own-store manager (managers issue keys/uniform in store); not staff self-service.
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
+    rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+    if not rows: return RedirectResponse("/staff", status_code=303)
+    s = dict(rows[0]); name = f"{s['first_name']} {s['last_name']}"
+    is_leaver = not s["is_active"]
+
+    items = [dict(r) for r in (q("""SELECT * FROM staff_issued_items WHERE staff_id=?
+                 ORDER BY (status='Issued') DESC, date_issued DESC, item_id DESC""",
+                 (staff_id,), fetch=True) or [])]
+    outstanding = [it for it in items if it["status"] == "Issued"]
+    flash = f"<div class='flash-{'success' if msg_type=='success' else 'error'}'>{esc(msg)}</div>" if msg else ""
+
+    # ── Outstanding banner (the leaving-checklist payoff) ──
+    if outstanding:
+        lead = ("&#9888;&#65039; This person has LEFT &mdash; these items must be collected:"
+                if is_leaver else "Currently held &mdash; to be returned when leaving:")
+        li = "".join(
+            f"<li><strong>{esc(it['item_type'])}</strong>"
+            f"{(' &mdash; ' + esc(it['details'])) if it['details'] else ''}"
+            f"{(' &times;' + str(it['qty'])) if (it['qty'] or 1) != 1 else ''}</li>"
+            for it in outstanding)
+        banner = (f"<div class='card' style='border-left:4px solid "
+                  f"{'#dc2626' if is_leaver else '#f59e0b'};margin-bottom:16px'>"
+                  f"<div style='font-weight:900;color:#0f2942;margin-bottom:6px'>{lead}</div>"
+                  f"<ul style='margin:0 0 0 18px;color:#334155;font-size:14px'>{li}</ul></div>")
+    else:
+        banner = ("<div class='card' style='border-left:4px solid #16a34a;margin-bottom:16px'>"
+                  "<div style='font-weight:700;color:#166534'>&#10003; Nothing outstanding "
+                  "&mdash; no items to return.</div></div>")
+
+    # ── Add form ──
+    opts = "".join(f"<option>{t}</option>" for t in ISSUED_ITEM_TYPES)
+    today = datetime.now().strftime("%Y-%m-%d")
+    add_form = f"""
+    <form method='POST' action='/staff/{staff_id}/issued-items/add' class='card' style='margin-bottom:16px'>
+      <div style='font-weight:900;color:#0f2942;margin-bottom:10px'>&#10133; Issue an item</div>
+      <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px'>
+        <label style='display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#475569'>Item type
+          <select name='item_type' style='{_IST}'>{opts}</select></label>
+        <label style='display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#475569'>Description
+          <input name='details' placeholder='e.g. Front door key / Polo shirt' style='{_IST}'></label>
+        <label style='display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#475569'>Quantity
+          <input type='number' name='qty' value='1' min='1' style='{_IST}'></label>
+        <label style='display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#475569'>Date issued
+          <input type='date' name='date_issued' value='{today}' style='{_IST}'></label>
+      </div>
+      <div style='margin-top:12px;padding-top:12px;border-top:1px solid #e2e8f0'>
+        <label style='display:flex;align-items:center;gap:8px;font-weight:700;color:#0f2942;font-size:13px'>
+          <input type='checkbox' name='sign_now' value='1'> Record receipt now (soft signature)</label>
+        <div style='margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
+          <input name='signed_name' placeholder='Type full name to confirm receipt' value='{esc(name)}'
+                 style='{_IST};min-width:260px'>
+        </div>
+        <div style='font-size:11px;color:#94a3b8;margin-top:6px'>Ticking and typing the name records that
+          {esc(s['first_name'])} received the item(s), with a date &amp; time stamp. You can also leave this
+          blank now and record the signature later.</div>
+      </div>
+      <button type='submit' class='btn-primary' style='margin-top:12px'>Add to register</button>
+    </form>"""
+
+    # ── Register table ──
+    def _row(it):
+        desc = esc(it['details'] or '')
+        if (it['qty'] or 1) != 1:
+            desc += f" <span style='color:#94a3b8'>&times;{it['qty']}</span>"
+        issued = esc(it['date_issued'] or '')
+        if it['issued_by']:
+            issued += f"<div style='font-size:11px;color:#94a3b8'>by {esc(it['issued_by'])}</div>"
+        # signed cell
+        if it['signed_name']:
+            signed = (f"&#9997;&#65039; {esc(it['signed_name'])}"
+                      f"<div style='font-size:11px;color:#94a3b8'>{esc(it['signed_at'] or '')}</div>")
+        elif it['status'] == 'Issued':
+            signed = (f"<form method='POST' action='/staff/{staff_id}/issued-items/{it['item_id']}/sign' "
+                      f"style='display:flex;gap:4px'>"
+                      f"<input name='signed_name' placeholder='Name' value='{esc(name)}' "
+                      f"style='{_IST};max-width:130px'>"
+                      f"<button type='submit' class='btn-secondary' style='padding:3px 8px;font-size:11px'>Sign</button></form>")
+        else:
+            signed = "<span style='color:#cbd5e1'>&mdash;</span>"
+        # status + actions
+        if it['status'] == 'Issued':
+            status_cell = _issued_status_badge('Issued')
+            actions = (f"<form method='POST' action='/staff/{staff_id}/issued-items/{it['item_id']}/close' "
+                       f"style='display:flex;gap:4px;flex-wrap:wrap;align-items:center'>"
+                       f"<select name='status' style='{_IST}'>"
+                       f"<option>Returned</option><option>Replaced</option><option>Lost</option></select>"
+                       f"<input name='note' placeholder='note' style='{_IST};max-width:120px'>"
+                       f"<button type='submit' class='btn-secondary' style='padding:3px 8px;font-size:11px'>Update</button></form>")
+        else:
+            status_cell = _issued_status_badge(it['status'])
+            if it['date_returned']:
+                status_cell += (f"<div style='font-size:11px;color:#94a3b8'>{esc(it['date_returned'])}"
+                                f"{(' &middot; ' + esc(it['closed_by'])) if it['closed_by'] else ''}</div>")
+            if it['returned_note']:
+                status_cell += f"<div style='font-size:11px;color:#64748b'>{esc(it['returned_note'])}</div>"
+            actions = (f"<form method='POST' action='/staff/{staff_id}/issued-items/{it['item_id']}/close' "
+                       f"style='display:inline'><input type='hidden' name='status' value='Issued'>"
+                       f"<button type='submit' class='btn-secondary' style='padding:3px 8px;font-size:11px' "
+                       f"title='Re-open this item'>&#8617; Re-open</button></form>")
+        return (f"<tr style='border-bottom:1px solid #f1f5f9'>"
+                f"<td style='padding:8px 10px;font-weight:700;color:#0f2942'>{esc(it['item_type'])}</td>"
+                f"<td style='padding:8px 10px'>{desc}</td>"
+                f"<td style='padding:8px 10px;font-size:13px'>{issued}</td>"
+                f"<td style='padding:8px 10px;font-size:13px'>{signed}</td>"
+                f"<td style='padding:8px 10px'>{status_cell}</td>"
+                f"<td style='padding:8px 10px'>{actions}</td></tr>")
+
+    if items:
+        table = (
+            "<div class='card' style='overflow-x:auto'>"
+            "<table style='width:100%;border-collapse:collapse;font-size:14px'>"
+            "<thead><tr style='text-align:left;color:#64748b;font-size:11px;text-transform:uppercase;"
+            "border-bottom:2px solid #e2e8f0'>"
+            "<th style='padding:8px 10px'>Item</th><th style='padding:8px 10px'>Description</th>"
+            "<th style='padding:8px 10px'>Issued</th><th style='padding:8px 10px'>Signed for</th>"
+            "<th style='padding:8px 10px'>Status</th><th style='padding:8px 10px'>Action</th></tr></thead>"
+            "<tbody>" + "".join(_row(it) for it in items) + "</tbody></table></div>")
+    else:
+        table = ("<div class='card' style='text-align:center;color:#94a3b8;padding:24px'>"
+                 "No items issued yet. Use the form above to record keys, uniform or equipment.</div>")
+
+    content = f"""
+    <div style='max-width:1000px;margin:0 auto'>
+      <a href='/staff/{staff_id}' style='color:#1e3a5f;font-size:13px;font-weight:700'>&larr; Back to {esc(name)}</a>
+      <div style='display:flex;justify-content:space-between;align-items:center;margin:8px 0 16px'>
+        <div class='text-2xl font-black text-slate-800'>&#128273; Issued Items &mdash; {esc(name)}</div>
+      </div>
+      {flash}
+      {banner}
+      {add_form}
+      {table}
+    </div>"""
+    return page(f"Issued Items — {name}", content, user, "staff")
+
+
+@router.post("/staff/{staff_id}/issued-items/add")
+async def issued_items_add(staff_id: int, request: Request,
+                           session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
+    from urllib.parse import quote as uq
+    f = await request.form()
+    item_type = (str(f.get("item_type", "") or "").strip() or "Other")
+    if item_type not in ISSUED_ITEM_TYPES:
+        item_type = "Other"
+    details = str(f.get("details", "") or "").strip()
+    try:
+        qty = int(float(f.get("qty", 1) or 1))
+    except (TypeError, ValueError):
+        qty = 1
+    qty = max(1, qty)
+    date_issued = str(f.get("date_issued", "") or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    if not details:
+        return RedirectResponse(
+            f"/staff/{staff_id}/issued-items?msg={uq('Please add a short description of the item')}&msg_type=error",
+            status_code=303)
+    sname = sat = None
+    if str(f.get("sign_now", "")).strip() in ("1", "on", "true"):
+        typed = str(f.get("signed_name", "") or "").strip()
+        if typed:
+            sname, sat = typed, datetime.now().strftime("%Y-%m-%d %H:%M")
+    q("""INSERT INTO staff_issued_items
+            (staff_id,item_type,details,qty,date_issued,issued_by,signed_name,signed_at,status)
+         VALUES(?,?,?,?,?,?,?,?, 'Issued')""",
+      (staff_id, item_type, details, qty, date_issued, user["username"], sname, sat))
+    return RedirectResponse(f"/staff/{staff_id}/issued-items?msg={uq('Item added to the register')}",
+                            status_code=303)
+
+
+@router.post("/staff/{staff_id}/issued-items/{item_id}/sign")
+async def issued_items_sign(staff_id: int, item_id: int, request: Request,
+                            session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
+    from urllib.parse import quote as uq
+    f = await request.form()
+    typed = str(f.get("signed_name", "") or "").strip()
+    if not typed:
+        return RedirectResponse(
+            f"/staff/{staff_id}/issued-items?msg={uq('Type the name to confirm receipt')}&msg_type=error",
+            status_code=303)
+    # only stamp an unsigned item (never overwrite an existing signature)
+    q("""UPDATE staff_issued_items SET signed_name=?, signed_at=?
+         WHERE item_id=? AND staff_id=? AND (signed_name IS NULL OR signed_name='')""",
+      (typed, datetime.now().strftime("%Y-%m-%d %H:%M"), item_id, staff_id))
+    return RedirectResponse(f"/staff/{staff_id}/issued-items?msg={uq('Receipt recorded')}",
+                            status_code=303)
+
+
+@router.post("/staff/{staff_id}/issued-items/{item_id}/close")
+async def issued_items_close(staff_id: int, item_id: int, request: Request,
+                             session: str | None = Cookie(default=None)):
+    redir, user = require_login(session)
+    if redir: return redir
+    if (r := _staff_access_guard(user, staff_id, allow_staff=False)): return r
+    from urllib.parse import quote as uq
+    f = await request.form()
+    new_status = str(f.get("status", "Returned") or "Returned").strip()
+    if new_status not in ("Returned", "Replaced", "Lost", "Issued"):
+        new_status = "Returned"
+    note = str(f.get("note", "") or "").strip()
+    row = q("SELECT item_id FROM staff_issued_items WHERE item_id=? AND staff_id=?",
+            (item_id, staff_id), fetch=True)
+    if not row:
+        return RedirectResponse(f"/staff/{staff_id}/issued-items?msg={uq('Item not found')}&msg_type=error",
+                                status_code=303)
+    if new_status == "Issued":   # re-open a previously closed item
+        q("""UPDATE staff_issued_items SET status='Issued', date_returned=NULL,
+                 returned_note=NULL, closed_by=? WHERE item_id=? AND staff_id=?""",
+          (user["username"], item_id, staff_id))
+        m = "Item re-opened"
+    else:
+        q("""UPDATE staff_issued_items SET status=?, date_returned=?, returned_note=?, closed_by=?
+             WHERE item_id=? AND staff_id=?""",
+          (new_status, datetime.now().strftime("%Y-%m-%d"), note or None,
+           user["username"], item_id, staff_id))
+        m = f"Marked {new_status}"
+    return RedirectResponse(f"/staff/{staff_id}/issued-items?msg={uq(m)}", status_code=303)
 
 
 def _doc_kind(path: str) -> str:
