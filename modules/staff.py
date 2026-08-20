@@ -1684,6 +1684,7 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
         {fi('notice_period','Notice Period','text',sv.get('notice_period',''),placeholder='e.g. 1 week, 12 weeks')}
         {fi('date_joined','Date Joined','date',sv.get('date_joined'))}
         {fi('contracted_hrs','Contracted Hours/Week','number',sv.get('contracted_hrs'),placeholder='e.g. 37.5')}
+        {fi('days_per_week','Days Worked/Week','number',sv.get('days_per_week'),placeholder='e.g. 5 (used for salaried leave)')}
         {fi('hourly_rate','Hourly Rate (£)','number',sv.get('hourly_rate'),placeholder='e.g. 11.44')}
         {fi('is_salaried','Salaried?',opts=[('N','No'),('Y','Yes')],val=sv.get('is_salaried','N'))}
         {fi('salary_amount','Salary Amount (£/yr)','number',sv.get('salary_amount'))}
@@ -1747,14 +1748,14 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
     q("""INSERT INTO staff_profiles
         (staff_number,first_name,last_name,store_name,sex,phone,email,
          address_1,address_2,address_3,postcode,date_joined,date_of_birth,
-         contracted_hrs,hourly_rate,is_salaried,salary_amount,is_active,
+         contracted_hrs,days_per_week,hourly_rate,is_salaried,salary_amount,is_active,
          job_title,employment_type,reports_to,notice_period,notes)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (next_no, fv("first_name"), fv("last_name"),
        fv("store_name"), fv("sex"), fv("phone"), fv("email"),
        fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
        fv("date_joined") or None, fv("date_of_birth") or None,
-       fn("contracted_hrs"), fn("hourly_rate"),
+       fn("contracted_hrs"), fn("days_per_week"), fn("hourly_rate"),
        fv("is_salaried","N"), fn("salary_amount"),
        int(form.get("is_active", 1)),
        fv("job_title") or None, fv("employment_type") or None,
@@ -1778,7 +1779,7 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
         q("""UPDATE staff_profiles SET
             staff_number=?,first_name=?,last_name=?,store_name=?,sex=?,
             phone=?,email=?,address_1=?,address_2=?,address_3=?,postcode=?,
-            date_joined=?,date_of_birth=?,contracted_hrs=?,hourly_rate=?,
+            date_joined=?,date_of_birth=?,contracted_hrs=?,days_per_week=?,hourly_rate=?,
             is_salaried=?,salary_amount=?,is_active=?,date_left=?,leaving_reason=?,
             job_title=?,employment_type=?,reports_to=?,notice_period=?,notes=?
             WHERE staff_id=?""",
@@ -1786,7 +1787,7 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
            fv("store_name"), fv("sex"), fv("phone"), fv("email"),
            fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
            fv("date_joined") or None, fv("date_of_birth") or None,
-           fn("contracted_hrs"), fn("hourly_rate"),
+           fn("contracted_hrs"), fn("days_per_week"), fn("hourly_rate"),
            fv("is_salaried","N"), fn("salary_amount"),
            int(form.get("is_active",1)),
            fv("date_left") or None, fv("leaving_reason") or None,
@@ -2214,6 +2215,25 @@ async def save_pay_change(staff_id: int, request: Request, session: str | None =
     # If hours weren't given on the change, keep the existing contracted hours.
     if new_hrs is None:
         new_hrs = prev_hrs
+
+    # ── Sanity validation (catches slips like a £24,000 "hourly rate") ──
+    from urllib.parse import quote as uq
+    def _pay_err(m):
+        return RedirectResponse(f"/staff/{staff_id}/pay-history?msg={uq(m)}&msg_type=error", status_code=303)
+    if not eff_date:
+        return _pay_err("Please give an effective date for the change.")
+    if new_hrs is not None and (new_hrs <= 0 or new_hrs > 80):
+        return _pay_err("Contracted hours look wrong — enter a value between 1 and 80.")
+    if basis == "salary":
+        if not new_salary or new_salary <= 0:
+            return _pay_err("Please enter the annual salary.")
+        if new_salary < 1000:
+            return _pay_err("That salary looks too low for a yearly figure — did you mean an hourly rate? Enter the full annual salary, or switch to Hourly.")
+    else:
+        if not new_rate or new_rate <= 0:
+            return _pay_err("Please enter the hourly rate.")
+        if new_rate > 100:
+            return _pay_err("That hourly rate looks too high (over £100/hr) — did you mean a salary? Switch to Salary basis, or check the figure.")
 
     q("""INSERT INTO pay_history
            (staff_id,effective_date,pay_basis,hourly_rate,previous_rate,
