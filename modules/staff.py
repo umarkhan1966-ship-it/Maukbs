@@ -4118,11 +4118,13 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
           </label>
         </div>
       </div>
-      <div style='display:flex;gap:8px'>
+      <div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center'>
         <button type='submit' name='action' value='save' class='btn-secondary'>💾 Save Progress</button>
         <button type='submit' name='action' value='complete' class='btn-primary'>✅ Mark Complete</button>
+        <a href='/staff/{staff_id}/onboarding/new_employee_notify/generate-pdf' class='btn-secondary'>⬇️ Download as PDF (for accountant)</a>
         <a href='/staff/{staff_id}/onboarding' class='btn-secondary'>Cancel</a>
       </div>
+      <div style='font-size:11px;color:#94a3b8;margin-top:4px'>Save first so your latest entries are in the PDF. The PDF fills the details the app knows and leaves the payroll fields for the accountant.</div>
     </form>"""
 
     _st = _onboarding_lock_state(staff_id, "new_employee_notify")
@@ -4164,6 +4166,95 @@ async def save_new_employee_notify(
         q("UPDATE staff_profiles SET emergency_contact=? WHERE staff_id=? AND (emergency_contact IS NULL OR emergency_contact='')",
           (_em, staff_id))
     return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('Notification saved')}", status_code=303)
+
+
+@router.get("/staff/{staff_id}/onboarding/new_employee_notify/generate-pdf")
+def new_employee_notify_pdf(staff_id: int, session: str | None = Cookie(default=None)):
+    """Owner-only: generate a filled PDF of the New Employee Notification to send
+    to the accountant — the app-known fields are filled from the saved form + the
+    staff record; payroll-only fields (tax code etc.) print blank for them."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}/onboarding", status_code=303)
+    rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+    if not rows: return RedirectResponse("/staff", status_code=303)
+    s = dict(rows[0]); name = f"{s['first_name']} {s['last_name']}"
+    import json
+    saved = q("SELECT form_data FROM onboarding_forms WHERE staff_id=? AND form_type='new_employee_notify'",
+              (staff_id,), fetch=True)
+    data = json.loads(dict(saved[0])["form_data"]) if saved and dict(saved[0])["form_data"] else {}
+    def fv(k, d=""): return data.get(k, d) if data else d
+    def _d(v):
+        try:
+            return datetime.strptime(str(v)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            return v or ""
+    _sex = (s.get('sex') or '').strip().lower()
+    gender = fv('gender') or ('Male' if _sex in ('m', 'male') else ('Female' if _sex in ('f', 'female') else ''))
+    if s.get('is_salaried') == 'Y':
+        wage = fv('wage') or f"£{(s.get('salary_amount') or 0):,.0f} per annum"
+        hol  = fv('holiday_days') or (f"5.6 weeks ({5.6 * s['days_per_week']:g} days)" if s.get('days_per_week') else "5.6 weeks")
+    else:
+        wage = fv('wage') or (f"£{s['hourly_rate']:.2f} per hour" if s.get('hourly_rate') else "")
+        hol  = fv('holiday_days') or (f"5.6 weeks ({round(5.6 * s['contracted_hrs'], 1):g} hours)" if s.get('contracted_hrs') else "")
+    addr = fv('address') or ', '.join(filter(None, [s.get('address_1', ''), s.get('address_2', ''),
+                                                    s.get('address_3', ''), s.get('address_4', ''), s.get('postcode', '')]))
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    styles = getSampleStyleSheet()
+    cell = styles["Normal"].clone("cell"); cell.fontSize = 9; cell.leading = 12
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
+                            leftMargin=14 * mm, rightMargin=14 * mm, title=f"New Employee Notification - {name}")
+    elems = [Paragraph("New Employee Notification", styles["Title"]),
+             Paragraph(html.escape(fv('employer_name') or ''), styles["Normal"]),
+             Paragraph("<i>For payroll setup. Employer-completed details are filled in; the payroll fields "
+                       "are to be completed by the accountant.</i>", cell),
+             Spacer(1, 5 * mm)]
+
+    def section(heading, kv):
+        el = [Paragraph(f"<b>{heading}</b>", styles["Heading4"])]
+        tdata = [[Paragraph(f"<b>{html.escape(k)}</b>", cell),
+                  Paragraph(html.escape(str(v)) if v not in (None, "") else "", cell)] for k, v in kv]
+        t = Table(tdata, colWidths=[55 * mm, 122 * mm])
+        t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                               ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
+                               ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+        el += [t, Spacer(1, 4 * mm)]
+        return el
+
+    elems += section("Employee Details", [
+        ("Full Name", name), ("Title", fv('title')), ("Gender", gender),
+        ("Married", fv('married', 'No')), ("Date of Birth", _d(fv('dob') or s.get('date_of_birth'))),
+        ("NI Number", fv('nino') or s.get('ni_number', '')), ("Start Date", _d(fv('start_date') or s.get('date_joined'))),
+        ("Address", addr), ("Postcode", fv('postcode') or s.get('postcode', '')),
+        ("Phone", fv('phone') or s.get('phone', '')), ("Emergency Contact", fv('emergency') or s.get('emergency_contact', '')),
+    ])
+    elems += section("Employment / Payroll Details", [
+        ("Employer", fv('employer_name')), ("Pay Frequency", fv('pay_frequency', 'Monthly')),
+        ("Pay Day & Date", fv('pay_day')), ("Pay Method", fv('pay_method', 'BACS')),
+        ("Payroll No.", fv('payroll_no')), ("Tax Code", fv('tax_code')), ("NIC Letter", fv('nic_letter')),
+        ("Contracted Hours/Week", fv('contracted_hrs') or s.get('contracted_hrs', '')),
+        ("Wage / Salary", wage), ("Holiday Entitlement", hol),
+        ("Holiday Year", f"{_d(fv('holiday_start', '2026-01-01'))} to {_d(fv('holiday_end', '2026-12-31'))}"),
+        ("Employment Type", fv('emp_type', 'Permanent')), ("Student", fv('is_student', 'No')),
+        ("Only Employment", fv('only_employment', 'Yes')),
+    ])
+    _tick = lambda k: "Yes" if fv(k) else "—"
+    elems += section("Right to Work Documents Checked", [
+        ("UK or EEA Passport", _tick('rtw_passport')),
+        ("Full British Birth Certificate", _tick('rtw_birth_cert')),
+        ("Work Permit with Passport", _tick('rtw_work_permit')),
+    ])
+    doc.build(elems)
+    fn = ("New_Employee_Notification_" + f"{s['first_name']}_{s['last_name']}".replace(' ', '_') + ".pdf")
+    return Response(buf.getvalue(), media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename={fn}"})
 
 
 @router.post("/staff/{staff_id}/onboarding/{form_type}/unlock")
