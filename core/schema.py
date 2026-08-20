@@ -433,6 +433,12 @@ def init_db():
         # batch (stamped with that batch's sent date). NULL = not yet sent.
         ("accountant_sent_date", "accountant_sent_date TEXT"),
     ])
+    ensure_columns("staff_documents", [
+        # Soft-delete / recycle bin: a deleted document moves to the bin (file kept)
+        # so an accidental delete of a signed contract is recoverable. NULL = live.
+        ("deleted_at", "deleted_at TEXT"),
+        ("deleted_by", "deleted_by TEXT"),
+    ])
     ensure_columns("pay_history", [
         # Track more than just hourly rate, so a salary change / promotion /
         # hourly<->salary switch is captured in full (the original table only

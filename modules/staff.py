@@ -492,7 +492,7 @@ def staff_page(
         status_badge = "<span class='badge-paid'>Active</span>" if s["is_active"] else "<span class='badge-overdue'>Left</span>"
         # Day-one statutory: flag active staff with no current Employment Contract on file.
         contract_badge = ""
-        if s["is_active"] and not q("SELECT 1 FROM staff_documents WHERE staff_id=? AND doc_type='Employment Contract' AND is_current=1 LIMIT 1", (sid,), fetch=True):
+        if s["is_active"] and not q("SELECT 1 FROM staff_documents WHERE staff_id=? AND doc_type='Employment Contract' AND is_current=1 AND deleted_at IS NULL LIMIT 1", (sid,), fetch=True):
             contract_badge = "<span style='background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px'>&#9888;&#65039; No contract</span>"
         # Legal check: flag active staff whose Right to Work hasn't been verified yet.
         rtw_badge = ""
@@ -2741,7 +2741,7 @@ def staff_documents(
     is_owner = user["role"] == "owner"
 
     # Get all documents for this staff member
-    docs = q("""SELECT * FROM staff_documents WHERE staff_id=?
+    docs = q("""SELECT * FROM staff_documents WHERE staff_id=? AND deleted_at IS NULL
                 ORDER BY doc_type, version DESC""",
              (staff_id,), fetch=True) or []
 
@@ -2841,6 +2841,11 @@ def staff_documents(
           {action_html}
         </div>"""
 
+    bin_n = q("SELECT COUNT(*) c FROM staff_documents WHERE staff_id=? AND deleted_at IS NOT NULL",
+              (staff_id,), fetch=True)
+    bin_n = bin_n[0]["c"] if bin_n else 0
+    bin_btn = (f"<a href='/staff/{staff_id}/documents/bin' class='btn-secondary'>&#128465; Recycle Bin ({bin_n})</a>"
+               if user["role"] == "owner" and bin_n else "")
     content = f"""
     {flash}
     <div class='flex justify-between items-center flex-wrap gap-3'>
@@ -2848,7 +2853,10 @@ def staff_documents(
         <a href='/staff/{staff_id}' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to {name}</a>
         <div class='text-2xl font-black text-slate-800 mt-1'>📁 Documents — {name}</div>
       </div>
-      {'<a href="/staff/document-templates" class="btn-secondary">📋 Manage Templates</a>' if user["role"] == "owner" else ''}
+      <div style='display:flex;gap:8px'>
+        {bin_btn}
+        {'<a href="/staff/document-templates" class="btn-secondary">📋 Manage Templates</a>' if user["role"] == "owner" else ''}
+      </div>
     </div>
     {_rtw_panel_html(staff_id, get_rtw_check(staff_id), True) if is_owner else ''}
     <div style='display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(400px,1fr))'>
@@ -3136,34 +3144,130 @@ def view_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=No
 
 @router.post("/staff/{staff_id}/documents/{doc_id}/delete")
 def delete_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=None)):
-    """Delete one filed document version. Owner-only + version-aware: if the
-    deleted version was the current one, the next-highest version of that type
-    is promoted back to current so the record is never left in a broken state."""
+    """SOFT-delete one filed document version to the Recycle Bin. Owner-only +
+    version-aware: the file is KEPT (recoverable), the row is flagged deleted, and
+    if it was the current version the newest remaining LIVE version is promoted to
+    current so the record is never left broken."""
     redir, user = require_login(session)
     if redir: return redir
     if user["role"] != "owner":
         return RedirectResponse(f"/staff/{staff_id}/documents?msg=Only+the+owner+can+delete+documents&msg_type=error",
                                 status_code=303)
-    rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=?", (doc_id, staff_id), fetch=True)
+    rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=? AND deleted_at IS NULL",
+             (doc_id, staff_id), fetch=True)
     if not rows:
         return RedirectResponse(f"/staff/{staff_id}/documents", status_code=303)
     d = dict(rows[0])
-    # remove the file from disk (best-effort), then the DB row
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Move to bin (keep the file), clear its current flag.
+    q("UPDATE staff_documents SET deleted_at=?, deleted_by=?, is_current=0 WHERE doc_id=?",
+      (now, user.get("username", ""), doc_id))
+    # If it was the current version, promote the newest remaining LIVE version.
+    if d["is_current"]:
+        rem = q("""SELECT doc_id FROM staff_documents
+                   WHERE staff_id=? AND doc_type=? AND deleted_at IS NULL
+                   ORDER BY version DESC LIMIT 1""", (staff_id, d["doc_type"]), fetch=True)
+        if rem:
+            q("UPDATE staff_documents SET is_current=1 WHERE doc_id=?", (dict(rem[0])["doc_id"],))
+    from urllib.parse import quote as uq
+    return RedirectResponse(
+        f"/staff/{staff_id}/documents?msg={uq('Moved to Recycle Bin — you can restore it from there')}", status_code=303)
+
+
+@router.post("/staff/{staff_id}/documents/{doc_id}/restore")
+def restore_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=None)):
+    """Owner-only: bring a document back from the Recycle Bin. It returns as a
+    (non-current) version unless nothing of its type is current, in which case it
+    becomes current again."""
+    redir, user = require_login(session)
+    if redir: return redir
+    from urllib.parse import quote as uq
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Owner+only&msg_type=error", status_code=303)
+    rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=? AND deleted_at IS NOT NULL",
+             (doc_id, staff_id), fetch=True)
+    if not rows:
+        return RedirectResponse(f"/staff/{staff_id}/documents/bin", status_code=303)
+    d = dict(rows[0])
+    q("UPDATE staff_documents SET deleted_at=NULL, deleted_by=NULL WHERE doc_id=?", (doc_id,))
+    # If no live version of this type is current, make the restored one current.
+    has_current = q("""SELECT 1 FROM staff_documents WHERE staff_id=? AND doc_type=?
+                       AND is_current=1 AND deleted_at IS NULL LIMIT 1""",
+                    (staff_id, d["doc_type"]), fetch=True)
+    if not has_current:
+        q("UPDATE staff_documents SET is_current=1 WHERE doc_id=?", (doc_id,))
+    return RedirectResponse(
+        f"/staff/{staff_id}/documents/bin?msg={uq('Document restored')}", status_code=303)
+
+
+@router.post("/staff/{staff_id}/documents/{doc_id}/purge")
+def purge_staff_doc(staff_id: int, doc_id: int, session: str | None = Cookie(default=None)):
+    """Owner-only: permanently delete a document already in the Recycle Bin
+    (removes the file from disk + the DB row). Only reachable for binned docs."""
+    redir, user = require_login(session)
+    if redir: return redir
+    from urllib.parse import quote as uq
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Owner+only&msg_type=error", status_code=303)
+    rows = q("SELECT * FROM staff_documents WHERE doc_id=? AND staff_id=? AND deleted_at IS NOT NULL",
+             (doc_id, staff_id), fetch=True)
+    if not rows:   # never hard-delete something that isn't already in the bin
+        return RedirectResponse(f"/staff/{staff_id}/documents/bin", status_code=303)
+    d = dict(rows[0])
     try:
         if d["file_path"] and os.path.exists(d["file_path"]):
             os.remove(d["file_path"])
     except Exception:
         pass
     q("DELETE FROM staff_documents WHERE doc_id=?", (doc_id,))
-    # if we removed the current version, promote the newest remaining one of this type
-    if d["is_current"]:
-        rem = q("""SELECT doc_id FROM staff_documents WHERE staff_id=? AND doc_type=?
-                   ORDER BY version DESC LIMIT 1""", (staff_id, d["doc_type"]), fetch=True)
-        if rem:
-            q("UPDATE staff_documents SET is_current=1 WHERE doc_id=?", (dict(rem[0])["doc_id"],))
-    from urllib.parse import quote as uq
     return RedirectResponse(
-        f"/staff/{staff_id}/documents?msg={uq('Document deleted')}", status_code=303)
+        f"/staff/{staff_id}/documents/bin?msg={uq('Document permanently deleted')}", status_code=303)
+
+
+@router.get("/staff/{staff_id}/documents/bin", response_class=HTMLResponse)
+def documents_bin(staff_id: int, session: str | None = Cookie(default=None),
+                  msg: str = "", msg_type: str = "success"):
+    """Owner-only Recycle Bin — restore a deleted document, or delete it forever."""
+    redir, user = require_login(session)
+    if redir: return redir
+    if user["role"] != "owner":
+        return RedirectResponse(f"/staff/{staff_id}/documents?msg=Owner+only&msg_type=error", status_code=303)
+    rows = q("SELECT * FROM staff_profiles WHERE staff_id=?", (staff_id,), fetch=True)
+    if not rows: return RedirectResponse("/staff", status_code=303)
+    s = dict(rows[0]); name = f"{s['first_name']} {s['last_name']}"
+    binned = q("""SELECT * FROM staff_documents WHERE staff_id=? AND deleted_at IS NOT NULL
+                  ORDER BY deleted_at DESC""", (staff_id,), fetch=True) or []
+    flash = f"<div class='flash-{'success' if msg_type=='success' else 'error'}'>{esc(msg)}</div>" if msg else ""
+    rows_html = ""
+    for d in (dict(x) for x in binned):
+        view = (f"<a href='/staff/{staff_id}/documents/{d['doc_id']}/view' target='_blank' "
+                f"class='btn-secondary' style='padding:4px 10px;font-size:12px'>View</a>")
+        restore = (f"<form method='POST' action='/staff/{staff_id}/documents/{d['doc_id']}/restore' style='display:inline'>"
+                   f"<button class='btn-secondary' style='padding:4px 10px;font-size:12px;color:#16a34a'>&#8617; Restore</button></form>")
+        purge = (f"<form method='POST' action='/staff/{staff_id}/documents/{d['doc_id']}/purge' style='display:inline' "
+                 f"onsubmit=\"return confirm('Permanently delete this document? This CANNOT be undone.');\">"
+                 f"<button class='btn-danger' style='padding:4px 10px;font-size:12px'>&#128465; Delete forever</button></form>")
+        rows_html += (f"<tr><td style='font-weight:700'>{esc(d['doc_type'])}</td>"
+                      f"<td class='mono' style='font-size:12px'>v{d.get('version','')}</td>"
+                      f"<td style='font-size:12px;color:#64748b'>{esc(d.get('file_name') or '')}</td>"
+                      f"<td class='mono' style='font-size:12px;color:#64748b'>{esc(d.get('deleted_at') or '')}</td>"
+                      f"<td style='font-size:12px;color:#64748b'>{esc(d.get('deleted_by') or '')}</td>"
+                      f"<td><div style='display:flex;gap:6px'>{view}{restore}{purge}</div></td></tr>")
+    content = f"""
+    {flash}
+    <div>
+      <a href='/staff/{staff_id}/documents' style='color:#1e3a5f;font-size:13px;font-weight:700'>&larr; Back to Documents</a>
+      <div class='text-2xl font-black text-slate-800 mt-1'>&#128465; Recycle Bin &mdash; {esc(name)}</div>
+      <div style='font-size:13px;color:#64748b;margin-top:2px'>Deleted documents are kept here so an accidental delete can be undone.
+      <strong>Restore</strong> brings one back; <strong>Delete forever</strong> removes it permanently.</div>
+    </div>
+    <div class='card' style='padding:0;overflow:hidden;margin-top:12px'>
+      <div style='overflow-x:auto'><table class='tbl'>
+        <thead><tr><th>Type</th><th>Version</th><th>File</th><th>Deleted</th><th>By</th><th>Action</th></tr></thead>
+        <tbody>{rows_html or "<tr><td colspan='6' style='text-align:center;padding:24px;color:#94a3b8'>Recycle bin is empty</td></tr>"}</tbody>
+      </table></div>
+    </div>"""
+    return page(f"Recycle Bin — {name}", content, user, "staff")
 
 
 def ensure_onboarding_tables():
@@ -3207,7 +3311,7 @@ def get_onboarding_status(staff_id: int) -> dict:
     status_map = {dict(r)["form_type"]: dict(r)["status"] for r in rows}
 
     # Check staff_documents for document-based items
-    doc_rows = q("SELECT doc_type, is_current FROM staff_documents WHERE staff_id=? AND is_current=1",
+    doc_rows = q("SELECT doc_type, is_current FROM staff_documents WHERE staff_id=? AND is_current=1 AND deleted_at IS NULL",
                  (staff_id,), fetch=True) or []
     doc_types = {dict(d)["doc_type"] for d in doc_rows}
 
