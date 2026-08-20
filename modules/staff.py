@@ -3931,6 +3931,7 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
               placeholder='07700 123456'>
           </div>
           {fi('ni_number',       'National Insurance No.', val=fv('ni_number') or s.get('ni_number','') or '', placeholder='AB 12 34 56 C')}
+          {fi('emergency_contact','Emergency Contact', val=fv('emergency_contact') or s.get('emergency_contact','') or '', placeholder='Name & phone')}
           <div><label>Driving Licence</label>
             <select name='driving_licence'>
               <option value=''>-- Select --</option>
@@ -4111,6 +4112,13 @@ async def save_employment_application(
     if _ni:
         q("UPDATE staff_profiles SET ni_number=? WHERE staff_id=? AND (ni_number IS NULL OR ni_number='')",
           (_ni, staff_id))
+
+    # Same blank-gap fill for the emergency contact (feeds the New Employee
+    # Notification and profile — captured once on the application).
+    _em = str(data.get("emergency_contact", "") or "").strip()
+    if _em:
+        q("UPDATE staff_profiles SET emergency_contact=? WHERE staff_id=? AND (emergency_contact IS NULL OR emergency_contact='')",
+          (_em, staff_id))
 
     from urllib.parse import quote as uq
     msg = "Application submitted ✅" if status=="completed" else "Progress saved"
