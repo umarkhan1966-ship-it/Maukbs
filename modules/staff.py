@@ -3636,7 +3636,7 @@ def employment_application_form(staff_id: int, session: str | None = Cookie(defa
             <input type='text' name='mobile' value='{esc(fv("mobile"))}'
               placeholder='07700 123456'>
           </div>
-          {fi('ni_number',       'National Insurance No.',placeholder='AB 12 34 56 C')}
+          {fi('ni_number',       'National Insurance No.', val=fv('ni_number') or s.get('ni_number','') or '', placeholder='AB 12 34 56 C')}
           <div><label>Driving Licence</label>
             <select name='driving_licence'>
               <option value=''>-- Select --</option>
@@ -3863,7 +3863,7 @@ def p46_form(staff_id: int, session: str | None = Cookie(default=None)):
               <option value='Female' {'selected' if fv('gender')=='Female' else ''}>Female</option>
             </select></div>
           <div><label>Date of Birth</label><input type='date' name='dob' value='{esc(fv("dob", s.get("date_of_birth","")))}' required></div>
-          <div><label>National Insurance Number</label><input type='text' name='nino' value='{esc(fv("nino"))}' placeholder='AB 12 34 56 C' required></div>
+          <div><label>National Insurance Number</label><input type='text' name='nino' value='{esc(fv("nino") or s.get("ni_number","") or "")}' placeholder='AB 12 34 56 C' required></div>
           <div style='grid-column:1/-1'><label>Address</label>
             <input type='text' name='address' value='{esc(fv("address", ", ".join(filter(None,[s.get("address_1",""),s.get("address_2",""),s.get("address_3",""),s.get("postcode","")]))))}'></div>
         </div>
