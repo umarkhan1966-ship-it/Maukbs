@@ -417,6 +417,10 @@ def init_db():
         ("notice_period",   "notice_period TEXT"),   # e.g. '1 week', '12 weeks' — per person, as Umar tracks in Excel
         ("days_per_week",   "days_per_week REAL"),   # for SALARIED holiday entitlement (5.6 wks × days/wk)
         ("notes",           "notes TEXT"),           # free-form internal notes/comments (owner/manager only)
+        # Single-source-of-truth fields: entered once (edit form or at onboarding),
+        # then pulled into the New Employee Notification etc. — no re-typing.
+        ("ni_number",         "ni_number TEXT"),         # National Insurance number
+        ("emergency_contact", "emergency_contact TEXT"), # emergency contact name/phone
     ])
     ensure_columns("supplier_terms", [
         ("pays_dd", "pays_dd TEXT"),   # 'Yes' = auto-set Payment Method to Direct Debit

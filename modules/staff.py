@@ -1665,7 +1665,10 @@ def render_staff_form(user: dict, s: dict | None) -> HTMLResponse:
         {fi('address_1','Address Line 1','text',sv.get('address_1'))}
         {fi('address_2','Address Line 2','text',sv.get('address_2'))}
         {fi('address_3','Town/City','text',sv.get('address_3'))}
+        {fi('address_4','County','text',sv.get('address_4'))}
         {fi('postcode','Postcode','text',sv.get('postcode'))}
+        {fi('ni_number','National Insurance No.','text',sv.get('ni_number'),placeholder='AB 12 34 56 C')}
+        {fi('emergency_contact','Emergency Contact','text',sv.get('emergency_contact'),placeholder='Name & phone')}
       </div>
     </div>"""
 
@@ -1747,20 +1750,22 @@ async def save_new_staff(request: Request, session: str | None = Cookie(default=
     next_no = (q("SELECT MAX(staff_number) m FROM staff_profiles", fetch=True)[0]["m"] or 0) + 1
     q("""INSERT INTO staff_profiles
         (staff_number,first_name,last_name,store_name,sex,phone,email,
-         address_1,address_2,address_3,postcode,date_joined,date_of_birth,
+         address_1,address_2,address_3,address_4,postcode,date_joined,date_of_birth,
          contracted_hrs,days_per_week,hourly_rate,is_salaried,salary_amount,is_active,
-         job_title,employment_type,reports_to,notice_period,notes)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         job_title,employment_type,reports_to,notice_period,notes,
+         ni_number,emergency_contact)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
       (next_no, fv("first_name"), fv("last_name"),
        fv("store_name"), fv("sex"), fv("phone"), fv("email"),
-       fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
+       fv("address_1"), fv("address_2"), fv("address_3"), fv("address_4"), fv("postcode"),
        fv("date_joined") or None, fv("date_of_birth") or None,
        fn("contracted_hrs"), fn("days_per_week"), fn("hourly_rate"),
        fv("is_salaried","N"), fn("salary_amount"),
        int(form.get("is_active", 1)),
        fv("job_title") or None, fv("employment_type") or None,
        fv("reports_to") or None, fv("notice_period") or None,
-       fv("notes") or None))
+       fv("notes") or None,
+       fv("ni_number") or None, fv("emergency_contact") or None))
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff?msg={uq('Staff member added successfully')}", status_code=303)
 
@@ -1778,14 +1783,15 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
     if is_mgr:
         q("""UPDATE staff_profiles SET
             staff_number=?,first_name=?,last_name=?,store_name=?,sex=?,
-            phone=?,email=?,address_1=?,address_2=?,address_3=?,postcode=?,
+            phone=?,email=?,address_1=?,address_2=?,address_3=?,address_4=?,postcode=?,
             date_joined=?,date_of_birth=?,contracted_hrs=?,days_per_week=?,hourly_rate=?,
             is_salaried=?,salary_amount=?,is_active=?,date_left=?,leaving_reason=?,
-            job_title=?,employment_type=?,reports_to=?,notice_period=?,notes=?
+            job_title=?,employment_type=?,reports_to=?,notice_period=?,notes=?,
+            ni_number=?,emergency_contact=?
             WHERE staff_id=?""",
           (form.get("staff_number") or None, fv("first_name"), fv("last_name"),
            fv("store_name"), fv("sex"), fv("phone"), fv("email"),
-           fv("address_1"), fv("address_2"), fv("address_3"), fv("postcode"),
+           fv("address_1"), fv("address_2"), fv("address_3"), fv("address_4"), fv("postcode"),
            fv("date_joined") or None, fv("date_of_birth") or None,
            fn("contracted_hrs"), fn("days_per_week"), fn("hourly_rate"),
            fv("is_salaried","N"), fn("salary_amount"),
@@ -1794,6 +1800,7 @@ async def save_staff(staff_id: int, request: Request, session: str | None = Cook
            fv("job_title") or None, fv("employment_type") or None,
            fv("reports_to") or None, fv("notice_period") or None,
            fv("notes") or None,
+           fv("ni_number") or None, fv("emergency_contact") or None,
            staff_id))
     else:
         # Staff can only update personal contact details
@@ -3804,6 +3811,13 @@ async def save_employment_application(
       (data.get("mobile") or data.get("phone",""),
        data.get("address",""), staff_id))
 
+    # Single source of truth: fill the record's NI number from this form if the
+    # record hasn't got one yet (blank-gap fill only — never overwrites).
+    _ni = str(data.get("ni_number", "") or "").strip()
+    if _ni:
+        q("UPDATE staff_profiles SET ni_number=? WHERE staff_id=? AND (ni_number IS NULL OR ni_number='')",
+          (_ni, staff_id))
+
     from urllib.parse import quote as uq
     msg = "Application submitted ✅" if status=="completed" else "Progress saved"
     return RedirectResponse(
@@ -3963,6 +3977,11 @@ async def save_p46(staff_id: int, request: Request, session: str | None = Cookie
     # Update DOB on profile
     if data.get("dob"):
         q("UPDATE staff_profiles SET date_of_birth=? WHERE staff_id=?", (data["dob"], staff_id))
+    # Fill the record's NI number if it hasn't got one yet (blank-gap fill only).
+    _ni = str(data.get("nino", "") or "").strip()
+    if _ni:
+        q("UPDATE staff_profiles SET ni_number=? WHERE staff_id=? AND (ni_number IS NULL OR ni_number='')",
+          (_ni, staff_id))
     from urllib.parse import quote as uq
     return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('P46 saved')}", status_code=303)
 
@@ -3990,6 +4009,26 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
         ph = f"placeholder='{ph}'" if ph else ""
         return f"<div><label>{lbl}</label><input type='{ft}' name='{nm}' value='{esc(v)}' {ph}></div>"
 
+    # Pre-fill values pulled from the staff record (single source of truth) —
+    # a filled starting point the owner can still override.
+    _sex = (s.get('sex') or '').strip().lower()
+    gender_val = fv('gender') or ('Male' if _sex in ('m', 'male') else ('Female' if _sex in ('f', 'female') else ''))
+    title_val  = fv('title')
+    if s.get('is_salaried') == 'Y':
+        wage_str = f"£{(s.get('salary_amount') or 0):,.0f} per annum"
+    elif s.get('hourly_rate'):
+        wage_str = f"£{s['hourly_rate']:.2f} per hour"
+    else:
+        wage_str = ''
+    if s.get('is_salaried') == 'Y' and s.get('days_per_week'):
+        hol_str = f"{5.6 * s['days_per_week']:g} days"
+    elif s.get('contracted_hrs'):
+        hol_str = f"{round(5.6 * s['contracted_hrs'], 1):g} hours"
+    else:
+        hol_str = ''
+    def _sel(current, option):
+        return "selected" if current == option else ""
+
     content = f"""
     <div>
       <a href='/staff/{staff_id}/onboarding' style='color:#1e3a5f;font-size:13px;font-weight:700'>← Back to Onboarding</a>
@@ -4002,16 +4041,20 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
         <div class='grid gap-3' style='grid-template-columns:repeat(auto-fit,minmax(220px,1fr))'>
           {fi('surname',      'Surname',       val=fv('surname') or s.get('last_name',''))}
           {fi('first_name',   'First Name(s)', val=fv('first_name') or s.get('first_name',''))}
-          <div><label>Title</label><select name='title'><option>Mr</option><option>Mrs</option><option>Miss</option><option>Ms</option></select></div>
-          <div><label>Gender</label><select name='gender'><option>Male</option><option>Female</option></select></div>
+          <div><label>Title</label><select name='title'>
+            <option {_sel(title_val,'Mr')}>Mr</option><option {_sel(title_val,'Mrs')}>Mrs</option>
+            <option {_sel(title_val,'Miss')}>Miss</option><option {_sel(title_val,'Ms')}>Ms</option></select></div>
+          <div><label>Gender</label><select name='gender'>
+            <option value='' {_sel(gender_val,'')}>-- Select --</option>
+            <option {_sel(gender_val,'Male')}>Male</option><option {_sel(gender_val,'Female')}>Female</option></select></div>
           <div><label>Married</label><select name='married'><option value='No'>No</option><option value='Yes' {'selected' if fv('married')=='Yes' else ''}>Yes</option></select></div>
           {fi('dob',          'Date of Birth', 'date', s.get('date_of_birth',''))}
-          {fi('nino',         'NI Number',     ph='AB 12 34 56 C')}
+          {fi('nino',         'NI Number',     val=fv('nino') or s.get('ni_number','') or '', ph='AB 12 34 56 C')}
           {fi('start_date',   'Start Date',    'date', s.get('date_joined',''))}
-          {fi('address',      'Employee Address', val=fv('address') or ', '.join(filter(None,[s.get('address_1',''),s.get('address_2',''),s.get('address_3',''),s.get('postcode','')])))}
+          {fi('address',      'Employee Address', val=fv('address') or ', '.join(filter(None,[s.get('address_1',''),s.get('address_2',''),s.get('address_3',''),s.get('address_4',''),s.get('postcode','')])))}
           {fi('postcode',     'Post Code',     val=fv('postcode') or s.get('postcode',''))}
           {fi('phone',        'Phone',         val=fv('phone') or s.get('phone',''))}
-          {fi('emergency',    'Emergency Contact')}
+          {fi('emergency',    'Emergency Contact', val=fv('emergency') or s.get('emergency_contact','') or '', ph='Name & phone')}
         </div>
       </div>
       <div class='card'>
@@ -4037,10 +4080,10 @@ def new_employee_notify_form(staff_id: int, session: str | None = Cookie(default
           {fi('tax_code',      'Tax Code',       ph='e.g. 1257L')}
           {fi('nic_letter',    'NIC Letter',     ph='e.g. A')}
           {fi('contracted_hrs','Contracted Hours/Week', val=fv('contracted_hrs') or str(s.get('contracted_hrs','')))}
-          {fi('wage',          'Wage/Salary',    ph='e.g. £12.71 per hour')}
+          {fi('wage',          'Wage/Salary',    val=fv('wage') or wage_str, ph='e.g. £12.71 per hour')}
           {fi('holiday_start', 'Holiday Year Start', 'date', fv('holiday_start','2026-01-01'))}
           {fi('holiday_end',   'Holiday Year End',   'date', fv('holiday_end','2026-12-31'))}
-          {fi('holiday_days',  'Holiday Entitlement (days)', ph='e.g. 19')}
+          {fi('holiday_days',  'Holiday Entitlement', val=fv('holiday_days') or hol_str, ph='e.g. 19 days')}
           <div><label>Employment Type</label>
             <select name='emp_type'>
               <option {'selected' if fv('emp_type','Permanent')=='Permanent' else ''}>Permanent</option>
@@ -4111,6 +4154,15 @@ async def save_new_employee_notify(
             unlocked=0""",
       (staff_id,"new_employee_notify",status,now,now if status=="completed" else None,json.dumps(data),
        user.get("username","") if status=="completed" else None))
+    # Fill the record's NI number / emergency contact if not already set (blank-gap fill only).
+    _ni = str(data.get("nino", "") or "").strip()
+    _em = str(data.get("emergency", "") or "").strip()
+    if _ni:
+        q("UPDATE staff_profiles SET ni_number=? WHERE staff_id=? AND (ni_number IS NULL OR ni_number='')",
+          (_ni, staff_id))
+    if _em:
+        q("UPDATE staff_profiles SET emergency_contact=? WHERE staff_id=? AND (emergency_contact IS NULL OR emergency_contact='')",
+          (_em, staff_id))
     return RedirectResponse(f"/staff/{staff_id}/onboarding?msg={uq('Notification saved')}", status_code=303)
 
 
